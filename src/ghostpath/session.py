@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from .cameras import Cameras, source_index
 from .dataset import Datasets, Record
-from .grip import BoomerangPath, GripAssist, GrippedPath
+from .grip import CarryGripPath, GripAssist, GrippedPath
 from .models import Command, Configuration, Mode, Phase
 from .motion import JOINTS, Motion, ParkTrajectory, Pose, SafetyFault, Settings
 from .poses import SavedStart, write_json
@@ -684,7 +684,7 @@ class Session:
     def _start_reverse(self, latched: Pose):
         self.reset_action = "reverse"
         origin = self._servo_origin(latched)
-        reverse = BoomerangPath(self.path)
+        reverse = CarryGripPath(self.path)
         path = AlignedPath(origin, reverse, CONTROL)
         if self.grip_assist_enabled:
             self.grip_assist = GripAssist(self.path, path, path.prefix, reverse)

@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from ghostpath.grip import GRIP_LIMIT, REVERSE_PRELOAD, BoomerangPath, GripAssist
+from ghostpath.grip import GRIP_LIMIT, REVERSE_PRELOAD, CarryGripPath, GripAssist
 from ghostpath.motion import JOINTS, Motion, ParkTrajectory, SafetyFault
 from ghostpath.robot import SimulatedFollower
 from ghostpath.session import CONTROL
@@ -142,7 +142,7 @@ def test_grip_assist_eases_back_and_replays_edits_at_the_same_arm_poses():
         before, previous_velocity = target["gripper"], velocity
 
 
-def test_boomerang_secures_the_pickup_and_keeps_the_taught_release_and_endpoints():
+def test_boomerang_adds_closure_only_during_carry_without_retiming():
     robot = SimulatedFollower(CONTROL)
     frames = [
         (0, 1),
@@ -171,28 +171,28 @@ def test_boomerang_secures_the_pickup_and_keeps_the_taught_release_and_endpoints
             samples.append(Sample(i + f, pose))
     samples.append(Sample(len(frames) - 1, {**start, "elbow_flex": 16}))
     path = ReplayPath(samples, Motion(start, robot.limits, CONTROL), CONTROL, speed=1)
-    reverse = BoomerangPath(path)
+    reverse = CarryGripPath(path)
     assert len(reverse.grasps) == 1
     pick, release = reverse.grasps[0]
-    assert reverse.duration > path.duration
+    assert reverse.duration == path.duration
     assert reverse.at(0) == path.end
     assert reverse.at(reverse.duration) == path.start
-    assert reverse.preload(pick - 0.2) == 0
+    assert reverse.preload(pick) == 0
     assert reverse.preload(pick + 0.65) == pytest.approx(-REVERSE_PRELOAD)
-    assert reverse.preload(release + 1) == 0
+    assert reverse.preload(release) == 0
     assist = GripAssist(path, reverse, 0, reverse)
     dt = reverse.duration / 2000
     previous = reverse.start
     velocity = dict.fromkeys(JOINTS, 0.0)
-    prior_fraction = 1.0
     for i in range(1, 2001):
         t = i * dt
         target = reverse.at(t)
-        fraction = reverse.forward_fraction(t)
-        assert 0 <= fraction <= prior_fraction
-        prior_fraction = fraction
-        original = path.at(fraction * path.duration)
-        assert target["elbow_flex"] == pytest.approx(original["elbow_flex"])
+        original = path.at(path.duration - t)
+        assert all(target[j] == original[j] for j in JOINTS[:-1])
+        if pick < t < release:
+            assert 0 <= original["gripper"] - target["gripper"] <= REVERSE_PRELOAD + 1e-8
+        else:
+            assert target == original
         for j in JOINTS:
             speed = (target[j] - previous[j]) / dt
             assert abs(speed) <= CONTROL.velocity(j)

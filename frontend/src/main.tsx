@@ -142,7 +142,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
     'reverse_reset',
     'Reset the scene with Boomerang?',
     state?.at_path_end
-      ? 'Verify the object is at its taught final placement and clear the reverse route. Boomerang retraces the path and can briefly slow to secure a detected grasp.'
+      ? 'Verify the object is at its taught final placement and clear the reverse route. Boomerang retraces the taught arm path.'
       : 'Verify the object is at its taught final placement and the gripper is empty. Clear both the route to the taught endpoint and the reverse route.',
     'Start Boomerang',
     { allow_auto_reset_once: true, grip_assist: gripAssist },
@@ -246,7 +246,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         : 'Replaying & recording'
       detail = state?.tracking_joint ? `Slowing for ${jointLabels[state.tracking_joint].toLowerCase()} to catch up.`
         : phase === 'returning' ? state?.reset_action === 'reverse'
-          ? 'Boomerang slows at detected pickups so the grip can settle before the lift. Verify the scene before recording.'
+          ? 'Verify the scene before recording.'
           : 'Keep the route clear until the arm settles. Recording starts after you verify the scene.'
         : `${state?.frames ?? 0} frames captured · ${elapsed(state?.elapsed ?? 0)} elapsed`
       extra = <>

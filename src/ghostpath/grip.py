@@ -1,7 +1,7 @@
 """Bounded gripper edits recorded against the forward path clock."""
 
 from bisect import bisect_right
-from math import ceil, isfinite, pi, sin, sqrt
+from math import ceil, isfinite, sqrt
 
 from .motion import JOINTS, Pose, Settings
 from .trajectory import Path, ReplayPath, ReversePath, _bernstein_peak
@@ -9,9 +9,8 @@ from .trajectory import Path, ReplayPath, ReversePath, _bernstein_peak
 GRIP_LIMIT = 6.0
 INPUT_TIMEOUT = 0.23
 REVERSE_PRELOAD = 2.5
-GRASP_HALF_WINDOW = 0.32
-GRASP_EXTRA_TIME = 0.40
-PRELOAD_RAMP = 0.46
+STABLE_GRIP_WINDOW = 0.32
+PRELOAD_RAMP = 0.55
 Knots = list[tuple[float, float]]
 
 
@@ -146,7 +145,7 @@ def _reverse_grasps(path: Path) -> list[tuple[float, float]]:
     poses = [path.at(i * step) for i in range(count + 1)]
     grip = [pose["gripper"] for pose in poses]
     look = ceil(2.5 / step)
-    settle = ceil(GRASP_HALF_WINDOW / step)
+    settle = ceil(STABLE_GRIP_WINDOW / step)
     grasps = []
     i = settle
     while i < count - settle:
@@ -187,68 +186,40 @@ def _reverse_grasps(path: Path) -> list[tuple[float, float]]:
     return grasps
 
 
-class BoomerangPath:
-    """Allow the jaws to settle at a taught pickup before following the carry."""
+class CarryGripPath:
+    """Close the jaws slightly more during inferred carries on the reverse path."""
 
     def __init__(self, forward: ReplayPath | GrippedPath):
         self.forward = forward
         self.reverse = ReversePath(forward, time_scale=1.0)
         self.start, self.end = self.reverse.start, self.reverse.end
-        self.grasps = _reverse_grasps(self.reverse)
-        self.duration = self.reverse.duration + GRASP_EXTRA_TIME * len(self.grasps)
-        self.windows = [
-            pick - GRASP_HALF_WINDOW + i * GRASP_EXTRA_TIME
-            for i, (pick, _) in enumerate(self.grasps)
+        self.duration = self.reverse.duration
+        self.grasps = [
+            (pick, release)
+            for pick, release in _reverse_grasps(self.reverse)
+            if release - pick >= 2 * PRELOAD_RAMP and not self._grasp_has_edits(pick, release)
         ]
-        self.automatic_grip = [
-            not self._grasp_has_edits(pick, release) for pick, release in self.grasps
-        ]
+        self.pickups = [pick for pick, _ in self.grasps]
 
     def _grasp_has_edits(self, pick: float, release: float) -> bool:
         if not isinstance(self.forward, GrippedPath):
             return False
-        start = pick - GRASP_HALF_WINDOW
-        end = min(self.reverse.duration, release + PRELOAD_RAMP)
-        steps = ceil((end - start) / 0.08)
+        steps = ceil((release - pick) / 0.08)
         return any(
-            abs(
-                self.forward.offset(1 - (start + (end - start) * i / steps) / self.forward.duration)
-            )
+            abs(self.forward.offset(1 - (pick + (release - pick) * i / steps) / self.duration))
             >= 0.25
             for i in range(steps + 1)
         )
 
-    def source_time(self, elapsed: float) -> float:
-        elapsed = _clamp(elapsed, 0.0, self.duration)
-        i = bisect_right(self.windows, elapsed) - 1
-        if i < 0:
-            return elapsed
-        start = self.windows[i]
-        width = 2 * GRASP_HALF_WINDOW
-        scale = (elapsed - start) / (width + GRASP_EXTRA_TIME)
-        if scale >= 1.0:
-            return elapsed - (i + 1) * GRASP_EXTRA_TIME
-        # The rate is one at both boundaries and lowest at the pickup pose.
-        travel = width * scale + GRASP_EXTRA_TIME * sin(2 * pi * scale) / (2 * pi)
-        return start - i * GRASP_EXTRA_TIME + travel
-
-    def forward_fraction(self, elapsed: float) -> float:
-        return _clamp(1 - self.source_time(elapsed) / self.forward.duration, 0.0, 1.0)
-
     def preload(self, elapsed: float) -> float:
-        source = self.source_time(elapsed)
-        i = bisect_right(self.windows, elapsed) - 1
-        if i < 0 or not self.automatic_grip[i] or source <= 0 or source >= self.reverse.duration:
+        i = bisect_right(self.pickups, elapsed) - 1
+        if i < 0:
             return 0.0
         pick, release = self.grasps[i]
-        ramp_start = pick - 0.14 + i * GRASP_EXTRA_TIME
-        release_end = min(self.reverse.duration, release + PRELOAD_RAMP)
-        weight = _ramp((elapsed - ramp_start) / PRELOAD_RAMP)
-        weight *= _ramp((release_end - source) / PRELOAD_RAMP)
-        return -REVERSE_PRELOAD * weight
+        return -REVERSE_PRELOAD * _ramp(min(elapsed - pick, release - elapsed) / PRELOAD_RAMP)
 
     def at(self, elapsed: float) -> Pose:
-        pose = self.reverse.at(self.source_time(elapsed))
+        pose = self.reverse.at(elapsed)
         pose["gripper"] = max(0.0, pose["gripper"] + self.preload(elapsed))
         return pose
 
@@ -261,12 +232,12 @@ class GripAssist:
         forward: ReplayPath | GrippedPath,
         reverse: Path,
         prefix: float,
-        boomerang: BoomerangPath | None = None,
+        carry_grip: CarryGripPath | None = None,
     ):
         self.forward = forward
         self.base = forward.base if isinstance(forward, GrippedPath) else forward
         self.reverse, self.prefix = reverse, prefix
-        self.boomerang = boomerang
+        self.carry_grip = carry_grip
         self.start, self.end, self.duration = reverse.start, reverse.end, reverse.duration
         self.direction = 0
         self.last_input = 0.0
@@ -299,10 +270,7 @@ class GripAssist:
         return self.forward.offset(fraction) if isinstance(self.forward, GrippedPath) else 0.0
 
     def _fraction(self, elapsed: float) -> float:
-        travel = elapsed - self.prefix
-        if self.boomerang:
-            return self.boomerang.forward_fraction(travel)
-        return _clamp(1 - travel / self.forward.duration, 0.0, 1.0)
+        return _clamp(1 - (elapsed - self.prefix) / self.forward.duration, 0.0, 1.0)
 
     def _delta(self, elapsed: float) -> float:
         travel = elapsed - self.prefix
@@ -311,8 +279,8 @@ class GripAssist:
         fraction = self._fraction(elapsed)
         fade = _ramp(travel / 0.24) * _ramp((self.duration - elapsed) / 0.48)
         previous = self._previous(fraction)
-        if self.boomerang:
-            previous += self.boomerang.preload(travel)
+        if self.carry_grip:
+            previous += self.carry_grip.preload(travel)
         offset = _clamp(previous + self.bias * fade, -GRIP_LIMIT, GRIP_LIMIT) - previous
         return offset
 
@@ -330,10 +298,10 @@ class GripAssist:
         self.offset = _clamp(issued - reference, -GRIP_LIMIT, GRIP_LIMIT)
         if (progress - self.trace[-1][0]) * self.base.duration >= 0.10 and progress < 1.0:
             saved = self.offset
-            if self.boomerang:
+            if self.carry_grip:
                 # Save the issued grip when the operator adjusts it. Fade away
                 # the reverse-only preload as the manual adjustment ends.
-                preload = self.boomerang.preload(elapsed - self.prefix)
+                preload = self.carry_grip.preload(elapsed - self.prefix)
                 saved += preload * _ramp(abs(self.offset))
             self.trace.append((progress, _clamp(saved, -GRIP_LIMIT, GRIP_LIMIT)))
             self.changed = self.changed or abs(saved) >= 0.15
