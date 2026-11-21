@@ -105,6 +105,8 @@ class Session:
         self.jog_active = False
         self.record_origin: float | None = None
         self.record_index = 0
+        self.record_candidate: Record | None = None
+        self.last_recorded_at = float("-inf")
         self.manual_started = 0.0
         self.manual_finish = False
         self.manual_goal: Pose | None = None
@@ -1012,6 +1014,8 @@ class Session:
             self._assert_controller()
             self.record_origin = None
             self.record_index = 0
+            self.record_candidate = None
+            self.last_recorded_at = float("-inf")
             self.stopped_early = False
             self.scene_reversed = False
             self.reset_action = None
@@ -1184,9 +1188,23 @@ class Session:
         if self.record_origin is None:
             self.record_origin = stamp
         due = self.record_origin + self.record_index / self.config.fps
-        if stamp >= due - 0.004:
-            self.datasets.offer(Record(stamp, self.pose, sent, manual))
-            self.record_index += 1
+        prior = self.record_candidate
+        current = Record(stamp, self.pose, sent, manual)
+        self.record_candidate = current
+        if stamp < due:
+            return
+        # Choose the nearer measured tick on either side of the sample time.
+        # Keep each command and encoder reading together and in original order.
+        if (
+            prior is not None
+            and prior.timestamp > self.last_recorded_at
+            and prior.manual == manual
+            and due - prior.timestamp < stamp - due
+        ):
+            current = prior
+        self.datasets.offer(current)
+        self.last_recorded_at = current.timestamp
+        self.record_index += 1
 
     def _seal(self, *, stopped: bool = False):
         self.stopped_early = stopped

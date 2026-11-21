@@ -29,6 +29,19 @@ def wait_for(ws, predicate):
     raise AssertionError("Expected workflow transition")
 
 
+def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):
+    session = Session(tmp_path)
+    session.config = Configuration(fps=20)
+    records = []
+    session.datasets = SimpleNamespace(error=None, offer=records.append)
+    for i, stamp in enumerate((0.0, 0.017, 0.032, 0.043, 0.061, 0.077, 0.094, 0.112)):
+        session.pose = {"gripper": float(i)}
+        session._record(stamp, {"gripper": float(i + 1)})
+    assert [frame.timestamp for frame in records] == [0.0, 0.043, 0.094]
+    assert [frame.state["gripper"] for frame in records] == [0, 3, 6]
+    assert [frame.action["gripper"] for frame in records] == [1, 4, 7]
+
+
 @pytest.mark.parametrize("during_prepare", [True, False])
 def test_camera_not_ready_returns_to_reset_before_motion(tmp_path, during_prepare):
     session = Session(tmp_path)
