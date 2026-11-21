@@ -142,7 +142,8 @@ def test_grip_assist_eases_back_and_replays_edits_at_the_same_arm_poses():
         before, previous_velocity = target["gripper"], velocity
 
 
-def test_boomerang_adds_closure_only_during_carry_without_retiming():
+@pytest.mark.parametrize("reversed_path", [False, True])
+def test_firm_grip_adds_closure_only_during_carry_without_retiming(reversed_path):
     robot = SimulatedFollower(CONTROL)
     frames = [
         (0, 1),
@@ -171,12 +172,12 @@ def test_boomerang_adds_closure_only_during_carry_without_retiming():
             samples.append(Sample(i + f, pose))
     samples.append(Sample(len(frames) - 1, {**start, "elbow_flex": 16}))
     path = ReplayPath(samples, Motion(start, robot.limits, CONTROL), CONTROL, speed=1)
-    reverse = CarryGripPath(path)
+    reverse = CarryGripPath(path, reverse=reversed_path)
     assert len(reverse.grasps) == 1
     pick, release = reverse.grasps[0]
     assert reverse.duration == path.duration
-    assert reverse.at(0) == path.end
-    assert reverse.at(reverse.duration) == path.start
+    assert reverse.at(0) == (path.end if reversed_path else path.start)
+    assert reverse.at(reverse.duration) == (path.start if reversed_path else path.end)
     assert reverse.preload(pick) == 0
     assert reverse.preload(pick + 0.65) == pytest.approx(-REVERSE_PRELOAD)
     assert reverse.preload(release) == 0
@@ -187,7 +188,7 @@ def test_boomerang_adds_closure_only_during_carry_without_retiming():
     for i in range(1, 2001):
         t = i * dt
         target = reverse.at(t)
-        original = path.at(path.duration - t)
+        original = path.at(path.duration - t if reversed_path else t)
         assert all(target[j] == original[j] for j in JOINTS[:-1])
         if pick < t < release:
             assert 0 <= original["gripper"] - target["gripper"] <= REVERSE_PRELOAD + 1e-8

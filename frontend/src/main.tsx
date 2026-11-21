@@ -101,10 +101,11 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
 }) {
   const [confirm, setConfirm] = useState<Confirm | null>(null)
   const [manualFinish, setManualFinish] = useState(config.mode === 'hybrid')
-  const [firmCarryGrip, setFirmCarryGrip] = useState(false)
+  const [firmGripChoice, setFirmCarryGrip] = useState<boolean | null>(null)
   const [gripAssist, setGripAssist] = useState(false)
   useEffect(() => setManualFinish(config.mode === 'hybrid'), [config.mode])
   const phase = state?.phase ?? 'setup'
+  const firmCarryGrip = firmGripChoice ?? state?.firm_carry_grip ?? false
   const simulated = config.device === 'simulation'
   const atStart = state?.at_start
   const hasStart = Boolean(state?.start_pose)
@@ -124,7 +125,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
   )
   const startReplay = () => instruct(
     'replay', 'Replay and record this take?', 'Verify the scene is reset and clear the arm’s full path and camera views.', 'Replay & record',
-    { manual_finish: manualFinish },
+    { manual_finish: manualFinish, firm_carry_grip: firmCarryGrip },
   )
   const autoReset = () => instruct(
     'auto_reset',
@@ -227,9 +228,9 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         {paused && !state?.can_continue && <p className="hint">Continuing requires the arm at the paused endpoint and teaching time remaining.</p>}
         {state?.notice.startsWith('Recording stopped before') && <p className="hint">{state.notice}</p>}
         {state?.notice.startsWith('Recording could not start') && <p className="hint" role="status">{state.notice}</p>}
-        {hasPath && !state?.scene_reversed && <label className="manual-option">
+        {hasPath && <label className="manual-option">
           <input type="checkbox" checked={firmCarryGrip} disabled={!available} onChange={event => setFirmCarryGrip(event.target.checked)} />
-          <span><strong>Firm grip during Boomerang</strong><small>Closes a little more during likely carries. Useful for rigid objects that slip.</small></span>
+          <span><strong>Firm grip</strong><small>Adds closure during carries in Boomerang and replay.</small></span>
         </label>}
         {hasPath && !state?.scene_reversed && <label className="manual-option">
           <input type="checkbox" checked={gripAssist} disabled={!available} onChange={event => setGripAssist(event.target.checked)} />
@@ -255,7 +256,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         : phase === 'returning' ? state?.reset_action === 'reverse'
           ? state.notice
           : 'Keep the route clear until the arm settles. Recording starts after you verify the scene.'
-        : `${state?.frames ?? 0} frames captured · ${elapsed(state?.elapsed ?? 0)} elapsed`
+        : `${state?.frames ?? 0} frames · ${elapsed(state?.elapsed ?? 0)}${state?.replay_firm_carries ? ` · Firm grip on ${state.replay_firm_carries} ${state.replay_firm_carries === 1 ? 'carry' : 'carries'}` : state?.replay_firm_carries === 0 ? ' · No carry matched for firm grip' : ''}`
       extra = <>
         <div className="motion-progress">
           <div><strong>{phase === 'replay' ? 'Ghost path progress' : 'Reset progress'}</strong>

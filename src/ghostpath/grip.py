@@ -138,8 +138,8 @@ def _quintic_bounds(delta: float, u: float, v: float, span: float) -> tuple[floa
     )
 
 
-def _reverse_grasps(path: Path) -> list[tuple[float, float]]:
-    """Find a close, a stable carrying interval, and a release in reverse order."""
+def _find_grasps(path: Path) -> list[tuple[float, float]]:
+    """Find a close, a stable carrying interval, and a release in travel order."""
     count = ceil(path.duration / 0.08)
     step = path.duration / count
     poses = [path.at(i * step) for i in range(count + 1)]
@@ -187,16 +187,17 @@ def _reverse_grasps(path: Path) -> list[tuple[float, float]]:
 
 
 class CarryGripPath:
-    """Close the jaws slightly more during inferred carries on the reverse path."""
+    """Close the jaws slightly more during inferred carries without retiming."""
 
-    def __init__(self, forward: ReplayPath | GrippedPath):
+    def __init__(self, forward: ReplayPath | GrippedPath, *, reverse: bool):
         self.forward = forward
-        self.reverse = ReversePath(forward, time_scale=1.0)
-        self.start, self.end = self.reverse.start, self.reverse.end
-        self.duration = self.reverse.duration
+        self.reversed = reverse
+        self.path = ReversePath(forward, time_scale=1.0) if reverse else forward
+        self.start, self.end = self.path.start, self.path.end
+        self.duration = self.path.duration
         self.grasps = [
             (pick, release)
-            for pick, release in _reverse_grasps(self.reverse)
+            for pick, release in _find_grasps(self.path)
             if release - pick >= 2 * PRELOAD_RAMP and not self._grasp_has_edits(pick, release)
         ]
         self.pickups = [pick for pick, _ in self.grasps]
@@ -204,10 +205,11 @@ class CarryGripPath:
     def _grasp_has_edits(self, pick: float, release: float) -> bool:
         if not isinstance(self.forward, GrippedPath):
             return False
+        if self.reversed:
+            pick, release = self.duration - release, self.duration - pick
         steps = ceil((release - pick) / 0.08)
         return any(
-            abs(self.forward.offset(1 - (pick + (release - pick) * i / steps) / self.duration))
-            >= 0.25
+            abs(self.forward.offset((pick + (release - pick) * i / steps) / self.duration)) >= 0.25
             for i in range(steps + 1)
         )
 
@@ -219,7 +221,7 @@ class CarryGripPath:
         return -REVERSE_PRELOAD * _ramp(min(elapsed - pick, release - elapsed) / PRELOAD_RAMP)
 
     def at(self, elapsed: float) -> Pose:
-        pose = self.reverse.at(elapsed)
+        pose = self.path.at(elapsed)
         pose["gripper"] = max(0.0, pose["gripper"] + self.preload(elapsed))
         return pose
 

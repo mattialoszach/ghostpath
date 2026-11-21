@@ -91,6 +91,7 @@ class Session:
         self.stopped_early = False
         self.scene_reversed = False
         self.firm_carry_grip = False
+        self.replay_firm_carries: int | None = None
         self.grip_assist_enabled = False
         self.grip_assist: GripAssist | None = None
         self.quality: dict | None = None
@@ -335,6 +336,8 @@ class Session:
                 if cmd.manual_finish is not None
                 else self.config.mode == Mode.HYBRID
             )
+            if cmd.firm_carry_grip is not None:
+                self.firm_carry_grip = cmd.firm_carry_grip
             self._begin_operation("prepare", self.datasets.prepare())
             self.notice = (
                 "Starting recording. The arm holds until the cameras and writer are ready."
@@ -359,7 +362,10 @@ class Session:
             self._begin_operation(
                 "save",
                 self.datasets.save(
-                    self.path_id, self.config.mode, manual_finish=self.manual_finish
+                    self.path_id,
+                    self.config.mode,
+                    manual_finish=self.manual_finish,
+                    firm_carry_grip=bool(self.replay_firm_carries),
                 ),
             )
         elif action in {"retry", "discard"}:
@@ -672,7 +678,8 @@ class Session:
                 self._near(self._reset_goal()) or self._near(self._park_goal())
             ):
                 raise WorkflowError("The arm moved away from the start. Verify its position.")
-            self.firm_carry_grip = cmd.firm_carry_grip
+            if cmd.firm_carry_grip is not None:
+                self.firm_carry_grip = cmd.firm_carry_grip
             self.grip_assist_enabled = cmd.grip_assist
             if at_endpoint:
                 self._start_reverse(latched)
@@ -690,8 +697,7 @@ class Session:
     def _start_reverse(self, latched: Pose):
         self.reset_action = "reverse"
         origin = self._servo_origin(latched)
-        carry_grip = CarryGripPath(self.path) if self.firm_carry_grip else None
-        self.firm_carry_grip = False
+        carry_grip = CarryGripPath(self.path, reverse=True) if self.firm_carry_grip else None
         reverse = carry_grip or ReversePath(self.path, time_scale=1.0)
         path = AlignedPath(origin, reverse, CONTROL)
         if self.grip_assist_enabled:
@@ -819,6 +825,7 @@ class Session:
 
     def _set_path(self, path: ReplayPath | GrippedPath, ident: str):
         self._update_path(path, ident)
+        self.firm_carry_grip = False
         self.reset_action = None
         self.scene_reversed = False
         self.phase = Phase.RESET
@@ -1008,7 +1015,9 @@ class Session:
             self.stopped_early = False
             self.scene_reversed = False
             self.reset_action = None
-            path = AlignedPath(origin, self.path, CONTROL)
+            carry_grip = CarryGripPath(self.path, reverse=False) if self.firm_carry_grip else None
+            self.replay_firm_carries = len(carry_grip.grasps) if carry_grip else None
+            path = AlignedPath(origin, carry_grip or self.path, CONTROL)
             self._start_player(path, Phase.REPLAY, held=latched)
             self._clear_teaching()
             self.notice = "Replaying the taught path and recording synchronized data."
@@ -1247,6 +1256,8 @@ class Session:
             "custom_rest": self.rest_pose is not None,
             "can_continue": self._can_continue(),
             "manual_finish": self.manual_finish,
+            "firm_carry_grip": self.firm_carry_grip,
+            "replay_firm_carries": self.replay_firm_carries if self.phase == Phase.REPLAY else None,
             "replay_stage": (
                 "aligning"
                 if self.player.cursor < self.player.path.prefix

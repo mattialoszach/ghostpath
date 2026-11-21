@@ -64,6 +64,8 @@ export interface State {
   reset_target: Pose | null
   can_continue: boolean
   manual_finish: boolean
+  firm_carry_grip: boolean
+  replay_firm_carries: number | null
   replay_stage: 'aligning' | 'path' | 'settling' | null
   stopped_early: boolean
   at_start: boolean

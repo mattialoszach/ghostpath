@@ -117,7 +117,7 @@ class Command(StrictModel):
     config: Configuration | None = None
     confirmed: bool = False
     allow_auto_reset_once: bool = False
-    firm_carry_grip: bool = False
+    firm_carry_grip: bool | None = None
     grip_assist: bool = False
     grip_direction: Literal[-1, 0, 1] = 0
     axes: dict[str, float] = Field(default_factory=dict, max_length=6)

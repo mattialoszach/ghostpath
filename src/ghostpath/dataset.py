@@ -266,16 +266,19 @@ class Datasets:
             "review_frames": self.review_frames,
         }
 
-    def save(self, path_id: str, mode: str, *, manual_finish: bool = False) -> Future:
-        return self.executor.submit(self._save, path_id, mode, manual_finish)
+    def save(
+        self, path_id: str, mode: str, *, manual_finish: bool = False, firm_carry_grip: bool = False
+    ) -> Future:
+        return self.executor.submit(self._save, path_id, mode, manual_finish, firm_carry_grip)
 
-    def _save(self, path_id: str, mode: str, manual_finish: bool):
+    def _save(self, path_id: str, mode: str, manual_finish: bool, firm_carry_grip: bool):
         quality = self._validate()
         record = {
             "episode": self.accepted,
             "path_id": path_id,
             "mode": mode,
             "manual_finish": manual_finish,
+            "firm_carry_grip": firm_carry_grip,
             **quality,
         }
         accepted_before = self._output_files()

@@ -171,6 +171,7 @@ def test_boomerang_can_start_at_distinct_rest_and_runs_before_recording(tmp_path
         assert stages == {"reverse_approach", "reverse"}
         assert session.phase == Phase.RESET
         assert session.scene_reversed
+        assert session._snapshot()["firm_carry_grip"]
         assert session.datasets is None
         assert session._snapshot()["at_start"]
         assert session.pose == pytest.approx(samples[0].pose, abs=2)
