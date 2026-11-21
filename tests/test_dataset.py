@@ -1,3 +1,4 @@
+import json
 from time import monotonic
 
 import numpy as np
@@ -91,6 +92,32 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     assert writer.accepted == 0
 
 
+@pytest.fixture
+def physical_writer(tmp_path):
+    pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    config = Configuration(
+        fps=20,
+        cameras=[
+            CameraSpec(name="workspace", source=0, width=160, height=120),
+            CameraSpec(name="wrist", source=1, width=160, height=120),
+        ],
+    )
+    store = Datasets(tmp_path / "paired", config, Cameras(config.cameras, simulation=False))
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def load_camera_history(store, stamp, streams):
+    for name, offsets in streams.items():
+        capture = store.cameras.captures[name]
+        capture.actual = 30.0
+        for i, offset in enumerate(offsets):
+            pixels = np.full((120, 160, 3), 20 * i, dtype=np.uint8)
+            capture.history.append(CameraFrame(i, stamp + offset, pixels))
+
+
 @pytest.mark.parametrize(
     ("streams", "expected", "skew"),
     [
@@ -107,36 +134,62 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     ],
     ids=["joint-skew", "reserve-next-sample"],
 )
-def test_joint_pairing_saves_episode_with_distinct_frames(tmp_path, streams, expected, skew):
+def test_joint_pairing_saves_episode_with_distinct_frames(physical_writer, streams, expected, skew):
     module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
-    config = Configuration(
-        fps=20,
-        cameras=[
-            CameraSpec(name="workspace", source=0, width=160, height=120),
-            CameraSpec(name="wrist", source=1, width=160, height=120),
-        ],
-    )
-    cameras = Cameras(config.cameras, simulation=False)
-    store = Datasets(tmp_path / "paired", config, cameras)
+    store = physical_writer
     stamp = monotonic() - 0.17
-    try:
-        for name, offsets in streams.items():
-            capture = cameras.captures[name]
-            capture.actual = 30.0
-            for i, offset in enumerate(offsets):
-                pixels = np.full((120, 160, 3), 20 * i, dtype=np.uint8)
-                capture.history.append(CameraFrame(i, stamp + offset, pixels))
-        store.prepare().result(timeout=30)
-        pose = SimulatedFollower(CONTROL).read()
-        for i in range(3):
-            store.offer(Record(stamp + i / 20, pose, pose, False))
-        assert store.seal().result(timeout=30)["camera_skew_ms"] == pytest.approx(skew)
-        store.save("paired-cameras", "teach").result(timeout=30)
-        store.finalize().result(timeout=30)
+    load_camera_history(store, stamp, streams)
+    store.prepare().result(timeout=30)
+    pose = SimulatedFollower(CONTROL).read()
+    for i in range(3):
+        store.offer(Record(stamp + i / 20, pose, pose, False))
+    quality = store.seal().result(timeout=30)
+    assert quality["camera_skew_ms"] == pytest.approx(skew)
+    assert quality["skipped_camera_samples"] == 0
+    store.save("paired-cameras", "teach").result(timeout=30)
+    store.finalize().result(timeout=30)
 
-        dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
-        assert dataset.num_frames == 3
-        for row, timestamps in zip(dataset, expected, strict=True):
-            assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(timestamps)
-    finally:
-        store.close()
+    dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
+    assert dataset.num_frames == 3
+    for row, timestamps in zip(dataset, expected, strict=True):
+        assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(timestamps)
+
+
+def test_isolated_wrist_gap_is_reported_and_keeps_actual_camera_and_robot_times(physical_writer):
+    module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    store = physical_writer
+    stamp = monotonic() - 0.24
+    load_camera_history(
+        store, stamp, {"workspace": [0, 0.05, 0.10, 0.15, 0.20], "wrist": [0, 0.05, 0.15, 0.20]}
+    )
+    store.prepare().result(timeout=30)
+    pose = SimulatedFollower(CONTROL).read()
+    for i in range(5):
+        store.offer(Record(stamp + i / 20, pose, pose, False))
+    quality = store.seal().result(timeout=30)
+    assert quality["frames"] == 4
+    assert quality["skipped_camera_samples"] == 1
+    assert quality["max_gap_ms"] == 100.0
+    store.save("isolated-gap", "teach").result(timeout=30)
+    store.finalize().result(timeout=30)
+    manifest = json.loads((store.root / "ghostpath.json").read_text())
+    assert manifest["episodes"][0]["skipped_camera_samples"] == 1
+
+    dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
+    assert dataset.num_frames == 4
+    for row, actual in zip(dataset, [0, 0.05, 0.15, 0.20], strict=True):
+        assert row["ghostpath.actual_timestamp"].item() == pytest.approx(actual)
+        assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx([actual, actual])
+
+
+def test_repeated_wrist_gaps_reject_the_take(physical_writer):
+    store = physical_writer
+    stamp = monotonic() - 0.24
+    load_camera_history(store, stamp, {"workspace": [0, 0.05, 0.10, 0.16], "wrist": [0, 0.16]})
+    store.prepare().result(timeout=30)
+    pose = SimulatedFollower(CONTROL).read()
+    for i in range(3):
+        store.offer(Record(stamp + i / 20, pose, pose, False))
+    with pytest.raises(ValueError, match="Repeated camera gaps: wrist"):
+        store.seal().result(timeout=30)
+    assert store.accepted == 0

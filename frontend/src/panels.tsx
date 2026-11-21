@@ -331,6 +331,7 @@ export function ReviewControls({ state, reviewIndex, change }: {
       <div><span>Duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
       <div><span>Max frame gap</span><strong>{quality.max_gap_ms} ms</strong></div>
       {quality.review_frames > 0 && <div><span>Camera skew</span><strong>{quality.camera_skew_ms} ms</strong></div>}
+      {!!quality.skipped_camera_samples && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
       <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
       <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
     </div>

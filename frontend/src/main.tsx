@@ -226,6 +226,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       extra = <>
         {paused && !state?.can_continue && <p className="hint">Continuing requires the arm at the paused endpoint and teaching time remaining.</p>}
         {state?.notice.startsWith('Recording stopped before') && <p className="hint">{state.notice}</p>}
+        {state?.notice.startsWith('Recording could not start') && <p className="hint" role="status">{state.notice}</p>}
         {hasPath && !state?.scene_reversed && <label className="manual-option">
           <input type="checkbox" checked={firmCarryGrip} disabled={!available} onChange={event => setFirmCarryGrip(event.target.checked)} />
           <span><strong>Firm grip during Boomerang</strong><small>Closes a little more during likely carries. Useful for rigid objects that slip.</small></span>

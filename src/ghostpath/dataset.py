@@ -13,10 +13,12 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import CameraFrame, Cameras, jpeg
+from .cameras import CameraFrame, Cameras, CameraSyncError, jpeg
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
+
+MIN_CAMERA_GAP_INTERVAL = 2.0
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,10 @@ class Datasets:
         self.accepted = 0
         self.review_dir: TemporaryDirectory | None = None
         self.review_frames = 0
-        self.started = self.last = self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
+        self.samples = self.skipped_camera_samples = 0
+        self.started = self.last_sample = self.last_saved = 0.0
+        self.last_camera_gap: float | None = None
+        self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
         self.indices: dict[str, int] = {}
         self.pending_record: Record | None = None
@@ -154,16 +159,41 @@ class Datasets:
         stamp = record.timestamp
         if not math.isfinite(stamp):
             raise ValueError("invalid telemetry timestamp")
-        if not self.frames:
+        if not self.samples:
             self.started = stamp
         else:
-            gap = stamp - self.last
-            scheduled = self.frames * period
+            gap = stamp - self.last_sample
+            scheduled = self.samples * period
             if not 0 < gap <= period * 1.8 or abs(stamp - self.started - scheduled) > period * 1.1:
                 raise ValueError("telemetry missed a recording deadline")
-            self.max_gap = max(self.max_gap, gap)
-        self.last = stamp
+        self.last_sample = stamp
+        self.samples += 1
         state, action = validate_pose(record.state), validate_pose(record.action)
+        if next_timestamp is not None and not 0 < next_timestamp - stamp <= period * 1.8:
+            next_timestamp = None
+        try:
+            captures, self.reserved_frames = self.cameras.frames(
+                stamp,
+                state,
+                period,
+                self.indices,
+                next_timestamp=next_timestamp,
+                reserved=self.reserved_frames,
+            )
+        except CameraSyncError as exc:
+            self.reserved_frames = None
+            if (
+                self.last_camera_gap is not None
+                and stamp - self.last_camera_gap < MIN_CAMERA_GAP_INTERVAL
+            ):
+                raise ValueError(f"Repeated camera gaps: {exc}") from exc
+            self.last_camera_gap = stamp
+            self.skipped_camera_samples += 1
+            return
+
+        if self.frames:
+            self.max_gap = max(self.max_gap, stamp - self.last_saved)
+        self.last_saved = stamp
         self.max_arm_error = max(
             self.max_arm_error, *(abs(action[j] - state[j]) for j in JOINTS[:-1])
         )
@@ -180,16 +210,6 @@ class Datasets:
         times = []
         previews = []
         review_interval = max(1, round(self.config.fps / 5))
-        if next_timestamp is not None and not 0 < next_timestamp - stamp <= period * 1.8:
-            next_timestamp = None
-        captures, self.reserved_frames = self.cameras.frames(
-            stamp,
-            state,
-            period,
-            self.indices,
-            next_timestamp=next_timestamp,
-            reserved=self.reserved_frames,
-        )
         for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
             if capture.pixels.shape != (spec.height, spec.width, 3):
@@ -239,6 +259,7 @@ class Datasets:
             "seconds": round(self.frames / self.config.fps, 2),
             "max_gap_ms": round(self.max_gap * 1000, 1),
             "camera_skew_ms": round(self.max_skew * 1000, 1),
+            "skipped_camera_samples": self.skipped_camera_samples,
             "sensor_offset_ms": round(self.max_sensor_offset * 1000, 1),
             "max_arm_error_deg": round(self.max_arm_error, 2),
             "max_gripper_error_pct": round(self.max_gripper_error, 2),
@@ -327,7 +348,10 @@ class Datasets:
         self.frames = 0
         self.indices.clear()
         self.pending_record = self.reserved_frames = None
-        self.started = self.last = self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
+        self.samples = self.skipped_camera_samples = 0
+        self.started = self.last_sample = self.last_saved = 0.0
+        self.last_camera_gap = None
+        self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
 
     def finalize(self) -> Future:

@@ -25,6 +25,14 @@ REOPEN_DELAY = 1.0
 FRAME_DELIVERY_GRACE = 0.012
 
 
+class CameraNotReady(ValueError):
+    """A camera is unavailable while a take is still preparing."""
+
+
+class CameraSyncError(ValueError):
+    """Live streams yielded no valid, unused set for an individual sample."""
+
+
 def source_index(value: int | str) -> int | str:
     if isinstance(value, int) or value.isdecimal():
         index = int(value)
@@ -351,11 +359,14 @@ class Cameras:
         for spec in self.recorded:
             status = statuses[spec.name]
             if not status["ready"]:
-                raise ValueError(f"{spec.name}: {status['problem'] or 'waiting for camera'}")
+                raise CameraNotReady(f"{spec.name}: {status['problem'] or 'waiting for camera'}")
             if not status["fps"]:
-                raise ValueError(f"{spec.name}: camera is warming up. Try again in a moment.")
+                raise CameraNotReady(f"{spec.name}: camera is warming up. Try again in a moment.")
             if status["fps"] < fps * 0.95:
-                raise ValueError(f"{spec.name}: capture is too slow. Lower the dataset FPS.")
+                raise CameraNotReady(
+                    f"{spec.name}: capturing {status['fps']:g} FPS for a {fps} FPS dataset. "
+                    "Lower the dataset FPS."
+                )
 
     def frames(
         self,
@@ -440,7 +451,7 @@ class Cameras:
     ) -> Never:
         for spec, frames in zip(self.recorded, groups, strict=True):
             if not frames:
-                raise ValueError(
+                raise CameraSyncError(
                     f"{spec.name}: no unused camera frame within {tolerance * 1000:.0f} ms"
                     " of the robot sample"
                 )
@@ -448,7 +459,7 @@ class Cameras:
             f"{spec.name} {min((f.timestamp - timestamp for f in frames), key=abs) * 1000:+.1f} ms"
             for spec, frames in zip(self.recorded, groups, strict=True)
         )
-        raise ValueError(
+        raise CameraSyncError(
             f"camera-to-camera skew is too high for the {tolerance * 1000:.0f} ms limit "
             f"(nearest individual frames relative to the robot sample: {offsets})"
         )

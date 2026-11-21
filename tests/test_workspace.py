@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import Future
 from time import monotonic, sleep
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ghostpath.api import create_app
+from ghostpath.cameras import CameraNotReady, Cameras
 from ghostpath.grip import CarryGripPath
 from ghostpath.models import Command, Configuration, Phase
 from ghostpath.motion import JOINTS, Motion
@@ -25,6 +27,26 @@ def wait_for(ws, predicate):
         if event["type"] == "state" and predicate(event["state"]):
             return event["state"]
     raise AssertionError("Expected workflow transition")
+
+
+@pytest.mark.parametrize("during_prepare", [True, False])
+def test_camera_not_ready_returns_to_reset_before_motion(tmp_path, during_prepare):
+    session = Session(tmp_path)
+    session.phase = Phase.PROCESSING
+    session.cameras = Cameras(session.config.cameras, simulation=False)
+    prepared = Future()
+    if during_prepare:
+        prepared.set_exception(CameraNotReady("wrist: waiting for camera"))
+    else:
+        prepared.set_result(None)
+    session.operation = ("prepare", prepared)
+
+    session._check_operation()
+
+    assert session.phase == Phase.RESET
+    assert session.operation is None
+    assert session.player is None
+    assert session.notice.startswith("Recording could not start.")
 
 
 def test_tcp_workspace_disconnect_stops_torque_off_teaching(tmp_path):

@@ -77,12 +77,14 @@ GhostPath uses the official LeRobot 0.7.0 writer and v3.0 metadata, Parquet, and
 | `action` | Position commands sent after bounds and hardware quantization. |
 | `observation.images.<name>` | RGB video for each selected camera. |
 | `timestamp` | Official per-episode, constant-FPS LeRobot time. |
-| `ghostpath.actual_timestamp` | Actual monotonic observation time relative to the first frame. |
+| `ghostpath.actual_timestamp` | Actual monotonic observation time relative to the first sampled robot observation. |
 | `ghostpath.camera_timestamps` | Per-camera host capture times relative to that same origin, in feature-name order. Present when recording video. |
 | `ghostpath.manual` | True for powered manual continuation frames. |
 | Episode, frame and task indices | Standard LeRobot indices and task metadata. |
 
 Joints are ordered `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`. Feature names use LeRobot’s `.pos` suffix. Arm joints use degrees and the gripper uses percent of calibrated travel. Hardware camera timestamps reflect host arrival. GhostPath selects a set of unused frames together, within 90% of one dataset frame interval of the robot sample and of each other. This is software synchronization across independent devices. Raw teaching lives in `data/paths/` as passive encoder samples and is kept out of active action labels. A `ghostpath.json` manifest lists the raw path and capture quality for each accepted episode.
+
+During recording, GhostPath looks one robot sample ahead to avoid using a camera frame that the next sample needs. It can omit one isolated camera gap every two seconds. Review and the episode manifest report the omitted samples. The LeRobot video uses the configured constant FPS, and the actual timestamp fields retain the gaps.
 
 Open a saved dataset with LeRobot directly:
 
@@ -114,7 +116,7 @@ For frontend hot reload, run `uv run --extra record ghostpath` and `npm --prefix
 
 - `robot.py` and `torque.py` adapt the LeRobot follower and manage verified torque transitions. The measured-goal seeding, joint units, and bounded jog logic build on the existing `lerobot-tools` SO-101 implementation.
 - `trajectory.py` preserves raw samples and builds a monotone quintic path through significant points, including gripper reversals. It retimes individual segments against velocity and acceleration bounds and paces playback from measured tracking error.
-- `cameras.py` and `dataset.py` capture and write outside the control loop. Stale sensors, excess skew, and a backed-up writer abort the take.
+- `cameras.py` and `dataset.py` capture and write outside the control loop. Reported stream failures, repeated camera gaps, and a backed-up writer abort the take.
 - `session.py` owns the robot and workflow state on one control thread. `api.py` provides the local FastAPI and WebSocket entry points. The React and TypeScript workspace lives in `frontend/`.
 
 Licensed under the [MIT License](LICENSE).

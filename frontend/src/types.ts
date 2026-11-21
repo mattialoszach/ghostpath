@@ -33,6 +33,7 @@ export interface Quality {
   seconds: number
   max_gap_ms: number
   camera_skew_ms: number
+  skipped_camera_samples?: number
   sensor_offset_ms: number
   max_arm_error_deg: number
   max_gripper_error_pct: number

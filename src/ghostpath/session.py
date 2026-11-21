@@ -13,7 +13,7 @@ from queue import Empty, Full, Queue
 from threading import Event, Thread
 from uuid import uuid4
 
-from .cameras import Cameras, source_index
+from .cameras import CameraNotReady, Cameras, source_index
 from .dataset import Datasets, Record
 from .grip import CarryGripPath, GripAssist, GrippedPath
 from .models import Command, Configuration, Mode, Phase
@@ -982,6 +982,12 @@ class Session:
         self.operation = None
         try:
             result = future.result()
+            if name == "prepare" and self.phase != Phase.FAULT:
+                self.cameras.check_recording(self.config.fps)
+        except CameraNotReady as exc:
+            self.phase = Phase.RESET
+            self.notice = f"Recording could not start. {exc}"
+            return
         except Exception as exc:
             self._fail(str(exc) or type(exc).__name__)
             return
@@ -1044,6 +1050,8 @@ class Session:
         dt, self.last_tick = now - self.last_tick, now
         if self.robot is None or self.phase in {Phase.SETUP, Phase.FAULT}:
             return
+        if self.phase in {Phase.REPLAY, Phase.MANUAL} and self.datasets.error:
+            raise SafetyFault(self.datasets.error)
         active = self.phase in ACTIVE
         if active:
             self._assert_controller()
