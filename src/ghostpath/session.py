@@ -31,6 +31,7 @@ from .trajectory import (
     NativePlayer,
     Player,
     ReplayPath,
+    ReversePath,
     Sample,
     ServoPlayer,
     Teaching,
@@ -89,6 +90,7 @@ class Session:
         self.return_phase: Phase | None = None
         self.stopped_early = False
         self.scene_reversed = False
+        self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist: GripAssist | None = None
         self.quality: dict | None = None
@@ -563,6 +565,7 @@ class Session:
         self._clear_teaching()
         self.reset_action = None
         self.return_phase = None
+        self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist = None
         self.stopped_early = False
@@ -664,14 +667,17 @@ class Session:
             raise WorkflowError("Continue teaching until the path is ready to reset.")
         self.return_phase = Phase.RESET if self.phase == Phase.TEACH_PAUSED else self.phase
         if reverse:
-            if self._near(self.path.end):
-                self.grip_assist_enabled = cmd.grip_assist
+            at_endpoint = self._near(self.path.end)
+            if not at_endpoint and not (
+                self._near(self._reset_goal()) or self._near(self._park_goal())
+            ):
+                raise WorkflowError("The arm moved away from the start. Verify its position.")
+            self.firm_carry_grip = cmd.firm_carry_grip
+            self.grip_assist_enabled = cmd.grip_assist
+            if at_endpoint:
                 self._start_reverse(latched)
                 self._clear_teaching()
                 return
-            if not (self._near(self._reset_goal()) or self._near(self._park_goal())):
-                raise WorkflowError("The arm moved away from the start. Verify its position.")
-            self.grip_assist_enabled = cmd.grip_assist
             self.reset_action = "reverse_approach"
             self._start_player(ParkTrajectory(latched, self.path.end, CONTROL), Phase.RETURNING)
             self.notice = "Moving to the taught endpoint before Boomerang."
@@ -684,12 +690,23 @@ class Session:
     def _start_reverse(self, latched: Pose):
         self.reset_action = "reverse"
         origin = self._servo_origin(latched)
-        reverse = CarryGripPath(self.path)
+        carry_grip = CarryGripPath(self.path) if self.firm_carry_grip else None
+        self.firm_carry_grip = False
+        reverse = carry_grip or ReversePath(self.path, time_scale=1.0)
         path = AlignedPath(origin, reverse, CONTROL)
         if self.grip_assist_enabled:
-            self.grip_assist = GripAssist(self.path, path, path.prefix, reverse)
+            self.grip_assist = GripAssist(self.path, path, path.prefix, carry_grip)
         self._start_player(self.grip_assist or path, Phase.RETURNING, held=latched)
-        self.notice = "Boomerang is reversing the taught motion before recording."
+        self.notice = "Verify the scene before recording."
+        if carry_grip is not None:
+            count = len(carry_grip.grasps)
+            segment = "likely carry" if count == 1 else "likely carries"
+            message = (
+                f"Firm grip is on for {count} {segment}."
+                if count
+                else "No carry qualified for extra grip."
+            )
+            self.notice = f"{message} {self.notice}"
 
     def _path_file(self, ident: str) -> Path:
         return self.data / "paths" / f"{ident}.json"
@@ -1166,6 +1183,7 @@ class Session:
         self.phase = Phase.FAULT
         self.fault = message
         self.demo = None
+        self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist = None
         if self.robot:

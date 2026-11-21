@@ -6,13 +6,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ghostpath.api import create_app
+from ghostpath.grip import CarryGripPath
 from ghostpath.models import Command, Configuration, Phase
 from ghostpath.motion import JOINTS, Motion
 from ghostpath.poses import write_json
 from ghostpath.robot import SimulatedFollower
 from ghostpath.session import CONTROL, Session, WorkflowError
 from ghostpath.torque import TorqueManager
-from ghostpath.trajectory import Sample, Teaching
+from ghostpath.trajectory import ReversePath, Sample, Teaching
 
 
 def wait_for(ws, predicate):
@@ -133,12 +134,15 @@ def test_boomerang_can_start_at_distinct_rest_and_runs_before_recording(tmp_path
             sleep(1 / CONTROL.fps)
         assert session._snapshot()["at_rest"]
         assert not session._snapshot()["at_start"]
-        session._command(Command(action="reverse_reset"))
+        session._command(Command(action="reverse_reset", firm_carry_grip=True))
         assert session.reset_action == "reverse_approach"
         stages = set()
         deadline = monotonic() + 10
         while session.phase == Phase.RETURNING and monotonic() < deadline:
             stages.add(session.reset_action)
+            if session.reset_action == "reverse":
+                assert isinstance(session.player.path.path, CarryGripPath)
+                assert session.notice.startswith("No carry qualified for extra grip.")
             session.heartbeat()
             session._tick(monotonic())
             sleep(1 / CONTROL.fps)
@@ -204,6 +208,7 @@ def test_continue_appends_to_the_same_path_at_the_selected_start(tmp_path):
         assert session.path.start == rest
         session._command(Command(action="reverse_reset"))
         assert session.reset_action == "reverse"
+        assert isinstance(session.player.path.path, ReversePath)
         assert session.teacher is None
         assert session.datasets is None
     finally:
