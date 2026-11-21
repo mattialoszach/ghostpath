@@ -41,7 +41,7 @@ function Header({ state, online, send }: { state: State | null; online: boolean;
   const recording = state?.recording
   useEffect(() => {
     const emergency = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && canStop && !document.querySelector('dialog[open]')) send('stop')
+      if (event.key === 'Escape' && canStop) send('stop')
     }
     window.addEventListener('keydown', emergency)
     return () => window.removeEventListener('keydown', emergency)
@@ -111,6 +111,14 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
   const hasStart = Boolean(state?.start_pose)
   const canReturn = available && (simulated || state?.torque === 'on')
   const canManagePower = Boolean(state?.connected && ['ready', 'teach_paused', 'reset', 'review', 'next', 'finished'].includes(phase))
+  const canDiscard = phase === 'teaching' || phase === 'teach_paused' ||
+    Boolean(state?.path && ['reset', 'reset_released', 'returning'].includes(phase))
+  const discardEpisode = (action: 'discard_episode' | 'discard' = 'discard_episode') => setConfirm({
+    title: 'Discard this episode?',
+    text: 'This ends the current attempt. Saved episodes and reusable paths stay in the library.',
+    label: 'Discard episode',
+    submit: () => send(action, { confirmed: true }),
+  })
   const instruct = (action: string, title: string, text: string, label: string, extra = {}) => {
     const submit = () => send(action, { confirmed: true, ...extra })
     if (simulated) submit()
@@ -170,6 +178,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         : canReturn ? 'Return to start to get ready to teach.'
         : 'Position the arm by hand, or turn torque on for an automatic return.'
       extra = <>
+        {state?.notice.startsWith('Episode discarded.') && <p className="hint" role="status">{state.notice}</p>}
         <div className="start-picker">
           <button className="button" disabled={!available} onClick={() => send('capture_start')}><Crosshair size={15} /> Use current position</button>
           <label className="field">Saved start poses
@@ -215,7 +224,6 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         : 'Use Boomerang from the taught endpoint, or return to start and reset the scene by hand.'
       controls = <>
         {paused && <button className="button" disabled={!available || !state?.can_continue} onClick={continueTeaching}><Hand size={15} /> Continue teaching</button>}
-        {paused && !hasPath && <button className="text-button" disabled={!available} onClick={() => send('discard_teaching')}>Start over</button>}
         {hasPath && (!atStart || !canReturn) && <>
           <button className="button" disabled={!available} onClick={release}><Hand size={15} /> Manual reset</button>
           {!atStart && returnButton}
@@ -286,7 +294,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       detail = state?.stopped_early ? 'Recording stopped early. Review the captured portion before saving.'
         : 'Capture passed validation. Check the recorded views before saving.'
       controls = <>
-        <button className="button quiet-danger" disabled={!available} onClick={() => send('discard')}><X size={15} /> Discard</button>
+        <button className="button quiet-danger" disabled={!available} onClick={() => discardEpisode('discard')}><X size={15} /> Discard episode</button>
         <button className="button" disabled={!available} onClick={() => send('retry')}><RotateCcw size={15} /> Retry</button>
         <button className="button primary" disabled={!available} onClick={() => send('save')}><Save size={15} /> Save episode</button>
       </>
@@ -327,7 +335,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       <div className="heading-icon">{phase === 'fault' ? <TriangleAlert size={17} /> : phase === 'finished' ? <BadgeCheck size={18} /> : phase === 'teaching' ? <Hand size={17} /> : <ArrowDownToDot size={17} />}</div>
       <div className="workflow-copy"><h2>{title}</h2><p>{detail}</p></div>
     </div>
-    {(controls || extra) && <div className="workflow-content">{extra}{controls && <div className="actions">{controls}</div>}</div>}
+    {(controls || extra || canDiscard) && <div className="workflow-content">{extra}{(controls || canDiscard) && <div className="actions">{controls}{canDiscard && <button className="button quiet-danger" disabled={!available} onClick={() => discardEpisode()}><X size={15} /> Discard episode</button>}</div>}</div>}
     {canManagePower && <div className="workflow-content idle-controls">
       <div className="actions">
         <button className="button" disabled={!available} onClick={changePower}>{torqueOn ? <ZapOff size={15} /> : <Zap size={15} />}{torqueOn ? phase === 'ready' ? 'Release arm to position' : 'Turn torque off' : 'Turn torque on'}</button>

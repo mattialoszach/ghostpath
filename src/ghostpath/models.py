@@ -92,6 +92,7 @@ class Command(StrictModel):
         "teach",
         "continue_teach",
         "discard_teaching",
+        "discard_episode",
         "stop_teach",
         "release_reset",
         "hold_reset",

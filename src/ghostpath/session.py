@@ -277,10 +277,18 @@ class Session:
             self._stop_teaching()
         elif action == "discard_teaching":
             self._require(Phase.TEACH_PAUSED)
-            self._clear_teaching()
-            self.path_id, self.path, self.chart = None, None, []
-            self.phase = Phase.READY
-            self.notice = "Choose a start pose for the next path."
+            self._discard_episode()
+        elif action == "discard_episode":
+            self._require(
+                Phase.TEACHING,
+                Phase.TEACH_PAUSED,
+                Phase.RESET,
+                Phase.RESET_RELEASED,
+                Phase.RETURNING,
+            )
+            if not cmd.confirmed:
+                raise WorkflowError("Confirm that you want to discard the current episode.")
+            self._discard_episode()
         elif action == "load_path":
             self._require(Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.NEXT)
             self._load_path(cmd.path_id)
@@ -932,6 +940,23 @@ class Session:
     def _clear_teaching(self):
         self.teacher = None
         self.teaching_origin = None
+
+    def _discard_episode(self):
+        if self.teacher is None and self.path is None:
+            raise WorkflowError("There is no episode in progress.")
+        if self.phase == Phase.RETURNING:
+            self.power.stop()
+        self._clear_teaching()
+        self.demo = self.player = self.path = self.path_id = None
+        self.chart, self.taught_grip = [], []
+        self.return_phase = self.reset_action = None
+        self.grip_assist = None
+        self.grip_assist_enabled = self.scene_reversed = self.firm_carry_grip = False
+        self.replay_firm_carries = None
+        self.progress = self.elapsed = 0.0
+        self.quality = None
+        self.phase = Phase.READY
+        self.notice = "Episode discarded. Return to your start pose to teach again."
 
     def _next(self, reuse: bool | None):
         self.quality = None

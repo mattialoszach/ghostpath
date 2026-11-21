@@ -42,6 +42,43 @@ def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):
     assert [frame.action["gripper"] for frame in records] == [1, 4, 7]
 
 
+@pytest.mark.parametrize("powered_reset", [False, True])
+def test_discard_episode_preserves_start_library_and_saved_count(tmp_path, powered_reset):
+    session = Session(tmp_path)
+    session.config = Configuration(cameras=[])
+    session._command(Command(action="connect"))
+    try:
+        session._command(Command(action="capture_start"))
+        selected = session.start_pose_id
+        session._command(Command(action="teach"))
+        pose = {**session.pose, "wrist_flex": 5.0}
+        if powered_reset:
+            session.robot.teach(pose)
+            session._stop_teaching()
+            # A compiled library entry is available after a completed teaching attempt.
+            samples = [
+                Sample(i / 60, {**session.start_pose, "wrist_flex": i / 8}) for i in range(41)
+            ]
+            session.teaching_origin = session.start_pose
+            ident = session._save_raw(samples, complete=True)
+            session._set_path(session._compile_path(samples, session.start_pose), ident)
+            session.heartbeat()
+            session._command(Command(action="auto_reset"))
+            assert session.phase == Phase.RETURNING
+        session.datasets = SimpleNamespace(accepted=2, quality=None)
+        with pytest.raises(WorkflowError, match="Confirm"):
+            session._command(Command(action="discard_episode"))
+        session._command(Command(action="discard_episode", confirmed=True))
+        assert session.phase == Phase.READY
+        assert session.teacher is None and session.player is None and session.path is None
+        assert session.start_pose_id == selected and session.datasets.accepted == 2
+        assert session.power.state == ("on" if powered_reset else "off")
+        if powered_reset:
+            assert session._path_file(ident).exists()
+    finally:
+        session._close_devices()
+
+
 @pytest.mark.parametrize("during_prepare", [True, False])
 def test_camera_not_ready_returns_to_reset_before_motion(tmp_path, during_prepare):
     session = Session(tmp_path)
