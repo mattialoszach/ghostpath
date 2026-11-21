@@ -10,6 +10,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Condition, Event, Thread
+from typing import Never
 
 import numpy as np
 from PIL import Image
@@ -115,6 +116,33 @@ def _match_frames(
         if score < best_score:
             best, best_score = match, score
     return best
+
+
+def _latest_match(groups: list[list[CameraFrame]], tolerance: float) -> list[CameraFrame] | None:
+    """Find the latest feasible frame on each camera to leave room for the current sample."""
+    if not groups:
+        return None
+    indices = [len(frames) - 1 for frames in groups]
+    while all(index >= 0 for index in indices):
+        match = [frames[index] for frames, index in zip(groups, indices, strict=True)]
+        latest = max(range(len(match)), key=lambda i: match[i].timestamp)
+        if match[latest].timestamp <= min(frame.timestamp for frame in match) + tolerance:
+            return match
+        # This frame is too new even for another camera's newest candidate.
+        indices[latest] -= 1
+    return None
+
+
+def _merge_candidates(
+    first: list[list[CameraFrame]], second: list[list[CameraFrame]]
+) -> list[list[CameraFrame]]:
+    return [
+        sorted(
+            {frame.sequence: frame for frame in (*early, *late)}.values(),
+            key=lambda frame: frame.sequence,
+        )
+        for early, late in zip(first, second, strict=True)
+    ]
 
 
 class Capture:
@@ -330,10 +358,17 @@ class Cameras:
                 raise ValueError(f"{spec.name}: capture is too slow. Lower the dataset FPS.")
 
     def frames(
-        self, timestamp: float, pose: Pose, period: float, after: dict[str, int]
-    ) -> list[CameraFrame]:
+        self,
+        timestamp: float,
+        pose: Pose,
+        period: float,
+        after: dict[str, int],
+        *,
+        next_timestamp: float | None = None,
+        reserved: list[CameraFrame] | None = None,
+    ) -> tuple[list[CameraFrame], list[CameraFrame] | None]:
         if not self.recorded:
-            return []
+            return [], None
         if self.simulation:
             return [
                 CameraFrame(
@@ -344,42 +379,71 @@ class Cameras:
                     ),
                 )
                 for spec in self.recorded
-            ]
+            ], None
 
         tolerance = period * 0.9
-        cutoff = timestamp + tolerance
-        deadline = cutoff + FRAME_DELIVERY_GRACE
 
-        def collect(through: float) -> list[list[CameraFrame]]:
+        def collect(stamp: float, through: float) -> list[list[CameraFrame]]:
             return [
                 self.captures[spec.name].candidates(
-                    timestamp,
+                    stamp,
                     after.get(spec.name, -1),
                     tolerance,
                     through=through,
-                    deadline=deadline,
+                    deadline=stamp + tolerance + FRAME_DELIVERY_GRACE,
                 )
                 for spec in self.recorded
             ]
 
-        groups = collect(timestamp)
-        if match := _match_frames(groups, timestamp, tolerance):
-            return match
+        groups = collect(timestamp, timestamp)
+        if reserved:
+            groups = _merge_candidates(groups, [[frame] for frame in reserved])
+        match = _match_frames(groups, timestamp, tolerance)
+        if match is None:
+            groups = _merge_candidates(groups, collect(timestamp, timestamp + tolerance))
+            match = _match_frames(groups, timestamp, tolerance)
+        if match is None:
+            self._raise_sync_error(groups, timestamp, tolerance)
+        if next_timestamp is None:
+            return match, None
 
-        # A camera may still deliver a compatible frame before the sampling
-        # window closes. Keep earlier candidates even if its history rolls over.
-        groups = [
-            list({frame.sequence: frame for frame in (*early, *late)}.values())
-            for early, late in zip(groups, collect(cutoff), strict=True)
-        ]
+        following = collect(next_timestamp, next_timestamp)
+
+        def next_match(current: list[CameraFrame]) -> list[CameraFrame] | None:
+            later = [
+                [frame for frame in frames if frame.sequence > used.sequence]
+                for frames, used in zip(following, current, strict=True)
+            ]
+            return _match_frames(later, next_timestamp, tolerance)
+
+        if future := next_match(match):
+            return match, future
+        following = _merge_candidates(
+            following, collect(next_timestamp, next_timestamp + tolerance)
+        )
+        if future := next_match(match):
+            return match, future
+
+        latest = _latest_match(following, tolerance)
+        if latest is not None:
+            earlier = [
+                [frame for frame in frames if frame.sequence < upcoming.sequence]
+                for frames, upcoming in zip(groups, latest, strict=True)
+            ]
+            alternative = _match_frames(earlier, timestamp, tolerance)
+            if alternative is not None:
+                return alternative, next_match(alternative)
+        return match, None
+
+    def _raise_sync_error(
+        self, groups: list[list[CameraFrame]], timestamp: float, tolerance: float
+    ) -> Never:
         for spec, frames in zip(self.recorded, groups, strict=True):
             if not frames:
                 raise ValueError(
                     f"{spec.name}: no unused camera frame within {tolerance * 1000:.0f} ms"
                     " of the robot sample"
                 )
-        if match := _match_frames(groups, timestamp, tolerance):
-            return match
         offsets = ", ".join(
             f"{spec.name} {min((f.timestamp - timestamp for f in frames), key=abs) * 1000:+.1f} ms"
             for spec, frames in zip(self.recorded, groups, strict=True)

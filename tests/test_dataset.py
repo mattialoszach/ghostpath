@@ -91,7 +91,23 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     assert writer.accepted == 0
 
 
-def test_joint_pairing_saves_an_episode_when_individual_nearest_frames_are_too_far_apart(tmp_path):
+@pytest.mark.parametrize(
+    ("streams", "expected", "skew"),
+    [
+        (
+            {"workspace": [-0.024, 0.038, 0.080, 0.120], "wrist": [-0.041, 0.025, 0.072, 0.112]},
+            [(0.038, 0.025), (0.080, 0.072), (0.120, 0.112)],
+            13.0,
+        ),
+        (
+            {"workspace": [-0.023, 0.007, 0.110, 0.150], "wrist": [-0.029, 0.007, 0.115, 0.151]},
+            [(-0.023, -0.029), (0.007, 0.007), (0.110, 0.115)],
+            6.0,
+        ),
+    ],
+    ids=["joint-skew", "reserve-next-sample"],
+)
+def test_joint_pairing_saves_episode_with_distinct_frames(tmp_path, streams, expected, skew):
     module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
     config = Configuration(
         fps=20,
@@ -103,7 +119,6 @@ def test_joint_pairing_saves_an_episode_when_individual_nearest_frames_are_too_f
     cameras = Cameras(config.cameras, simulation=False)
     store = Datasets(tmp_path / "paired", config, cameras)
     stamp = monotonic() - 0.17
-    streams = {"workspace": [-0.024, 0.038, 0.080, 0.120], "wrist": [-0.041, 0.025, 0.072, 0.112]}
     try:
         for name, offsets in streams.items():
             capture = cameras.captures[name]
@@ -115,15 +130,13 @@ def test_joint_pairing_saves_an_episode_when_individual_nearest_frames_are_too_f
         pose = SimulatedFollower(CONTROL).read()
         for i in range(3):
             store.offer(Record(stamp + i / 20, pose, pose, False))
-        assert store.seal().result(timeout=30)["camera_skew_ms"] == pytest.approx(13.0)
+        assert store.seal().result(timeout=30)["camera_skew_ms"] == pytest.approx(skew)
         store.save("paired-cameras", "teach").result(timeout=30)
         store.finalize().result(timeout=30)
 
         dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
         assert dataset.num_frames == 3
-        for row, expected in zip(
-            dataset, [(0.038, 0.025), (0.080, 0.072), (0.120, 0.112)], strict=True
-        ):
-            assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(expected)
+        for row, timestamps in zip(dataset, expected, strict=True):
+            assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(timestamps)
     finally:
         store.close()

@@ -13,7 +13,7 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import Cameras, jpeg
+from .cameras import CameraFrame, Cameras, jpeg
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
@@ -62,6 +62,8 @@ class Datasets:
         self.started = self.last = self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
         self.indices: dict[str, int] = {}
+        self.pending_record: Record | None = None
+        self.reserved_frames: list[CameraFrame] | None = None
         self.saved: list[dict] = []
 
     def prepare(self) -> Future:
@@ -130,14 +132,24 @@ class Datasets:
 
     def _consume(self, record: Record):
         try:
-            if not self.error:
-                self._add(record)
-        except Exception as exc:
-            self.error = f"Capture validation failed: {exc}"
+            if self.cameras.recorded and not self.cameras.simulation:
+                pending = self.pending_record
+                self.pending_record = record
+                if pending is not None:
+                    self._store(pending, next_timestamp=record.timestamp)
+            else:
+                self._store(record)
         finally:
             self.slots.release()
 
-    def _add(self, record: Record):
+    def _store(self, record: Record, *, next_timestamp: float | None = None):
+        if not self.error:
+            try:
+                self._add(record, next_timestamp=next_timestamp)
+            except Exception as exc:
+                self.error = f"Capture validation failed: {exc}"
+
+    def _add(self, record: Record, *, next_timestamp: float | None = None):
         period = 1 / self.config.fps
         stamp = record.timestamp
         if not math.isfinite(stamp):
@@ -168,7 +180,16 @@ class Datasets:
         times = []
         previews = []
         review_interval = max(1, round(self.config.fps / 5))
-        captures = self.cameras.frames(stamp, state, period, self.indices)
+        if next_timestamp is not None and not 0 < next_timestamp - stamp <= period * 1.8:
+            next_timestamp = None
+        captures, self.reserved_frames = self.cameras.frames(
+            stamp,
+            state,
+            period,
+            self.indices,
+            next_timestamp=next_timestamp,
+            reserved=self.reserved_frames,
+        )
         for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
             if capture.pixels.shape != (spec.height, spec.width, 3):
@@ -201,6 +222,9 @@ class Datasets:
         return self.executor.submit(self._seal, stopped_early)
 
     def _seal(self, stopped_early: bool) -> dict:
+        if self.pending_record is not None:
+            pending, self.pending_record = self.pending_record, None
+            self._store(pending)
         self.stopped_early = stopped_early
         return self._validate()
 
@@ -302,6 +326,7 @@ class Datasets:
         self.error = None
         self.frames = 0
         self.indices.clear()
+        self.pending_record = self.reserved_frames = None
         self.started = self.last = self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
 
