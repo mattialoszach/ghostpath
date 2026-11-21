@@ -441,7 +441,7 @@ class Session:
 
     def _connect(self):
         if (self.data / "datasets" / self.config.dataset).exists():
-            raise WorkflowError("This dataset name exists. Choose a new name in More preferences.")
+            raise WorkflowError("This dataset name exists. Enter a fresh name in setup.")
         robot = None
         try:
             if self.config.device == "simulation":

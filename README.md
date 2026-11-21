@@ -12,7 +12,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Node.
 ./start.sh
 ```
 
-Open [GhostPath on localhost](http://127.0.0.1:8765/). Choose **Connect simulator → Use current position → Example path**. When teaching pauses, choose **Boomerang scene reset**, then **Replay & record**. Turn on **Keyboard finish after replay** to try the handoff. Review the captured views, save the episode, and select **Finish session**. The virtual cameras and simulated joint lag let you try the workflow without a robot.
+Open [GhostPath on localhost](http://127.0.0.1:8765/). Choose **Connect simulator → Use current position → Example path**. When teaching pauses, choose **Boomerang scene reset**, then **Replay & record**. Turn on **Episode options → Keyboard finish** to try the handoff. Review the captured views, save the episode, and select **Session → Finish dataset**. The virtual cameras and simulated joint lag let you try the workflow without a robot.
 
 The first launch installs Python 3.12, the LeRobot recording dependencies, and the frontend dependencies as needed. Pass `--data /path/to/workspace` or `--port 8765` to change storage or the server port. Use one browser tab for control.
 
@@ -22,8 +22,8 @@ The first launch installs Python 3.12, the LeRobot recording dependencies, and t
 ./start.sh --hardware
 ```
 
-1. Set up the motor IDs and calibrate the arm with LeRobot 0.7.0. In GhostPath, select **SO-101**, scan the USB serial ports, and select the device. Enter the same calibration ID. Set a custom calibration directory in **More preferences** when needed.
-2. Give the session a task description and choose a collection mode. Set the dataset name in **More preferences**. GhostPath stores each session at `data/datasets/<name>` and requires a fresh directory.
+1. Set up the motor IDs and calibrate the arm with LeRobot 0.7.0. In GhostPath, select **SO-101**, scan the USB serial ports, and select the device. Enter the same calibration ID. Set a custom calibration directory in **Capture preferences** when needed.
+2. Give the session a task description and choose a collection mode. Enter a dataset name in setup. GhostPath stores each session at `data/datasets/<name>` and requires a fresh directory.
 3. Edit each camera row to set its local OpenCV device index, resolution, and capture FPS. Linux also supports a `/dev/videoN` source. Use the **Record** switches to include specific cameras in the dataset. Switches left off preserve live previews. Remove all camera rows for joint-only collection. On macOS, grant camera access to the app launching GhostPath if prompted.
 4. Connect and inspect the camera views and joint feedback. The dataset FPS defaults to 20 when switching from the simulator to the SO-101. Leave capture-rate headroom for independent camera clocks. Lower dataset FPS or resolution if capture validation reports missing frames or excessive skew. To look up local camera indices, run `uv run --extra hardware lerobot-find-cameras opencv` while GhostPath is disconnected.
 
@@ -37,16 +37,17 @@ Follow the official hardware instructions for the serial connection and calibrat
 2. **Teach and pause.** Support the arm and any object before releasing torque. Guide all six joints, including the gripper. Hold still while selecting **Stop teaching** so GhostPath can engage torque at the measured pose. **Continue teaching** appends to the same path from that endpoint. Time spent paused is excluded.
 3. **Reset the scene.** **Boomerang scene reset** retraces the arm and gripper motions from the taught endpoint to the selected start. Use it for reversible tasks and verify the object positions afterward. **Return to start** or **Manual reset → Hold & verify** lets you move the arm and reset the objects by hand. From the start, Boomerang can approach the taught endpoint first. Each saved path retains the start it was taught from.
    **Firm grip** applies to Boomerang and replay and is off by default. Enable it for rigid objects that slip. GhostPath looks for a close, arm movement with a steady gripper position, and a release. It adds a small closure margin inside that interval and keeps the arm path's timing. Carry detection uses joint positions alone.
-   Enable **Optional grip adjustment during Boomerang** to hold **C** to close more or **O** to open more. Release the key to ease back to the current grip profile. The timeline compares the taught grip with the adjustment, and a completed Boomerang saves your adjustments for replay.
-4. **Replay & record.** Clear the arm’s path and camera views. Capture starts on the first replay tick and includes the initial alignment. The ghost path progress bar follows the arm and shows when it is settling. With **Keyboard finish after replay** enabled, GhostPath displays the shortcuts during replay and unlocks them after the arm settles. Keyboard actions continue in the same recording.
+   Enable **Episode options → Keyboard grip adjustment** to hold **C** to close more or **O** to open more. Release the key to ease back to the current grip profile. The timeline compares the taught grip with the adjustment, and a completed Boomerang saves your adjustments for replay.
+4. **Replay & record.** Clear the arm’s path and camera views. Capture starts on the first replay tick and includes the initial alignment. The ghost path progress bar follows the arm and shows when it is settling. With **Episode options → Keyboard finish** enabled, GhostPath displays the shortcuts during replay and unlocks them after the arm settles. Keyboard actions continue in the same recording.
+   Use **Discard episode** during teaching or reset to end the draft. Saved episodes and reusable paths stay available.
 5. **Review.** Scrub the captured views and inspect timing and tracking metrics. **Retry** discards the take and returns to reset with the current path. **Discard** lets you decide what to do next. **Save episode** commits the take.
-6. **Continue or finish.** Use **Next episode** to collect another take or **Finish session** to close the dataset. There is no session episode-count cap. Individual teaching paths are limited to three minutes, and bounded replay paths to ten minutes. Saved paths can be loaded in a later session with the same arm calibration.
+6. **Continue or finish.** Use **Next episode** to collect another take or **Session → Finish dataset** to close the dataset. There is no session episode-count cap. Individual teaching paths are limited to three minutes, and bounded replay paths to ten minutes. Saved paths can be loaded in a later session with the same arm calibration.
 
 | Collection mode | Behavior |
 | --- | --- |
 | Teach every episode | The next episode starts at teaching. You can explicitly reuse the current path. |
 | Repeat path | The next episode starts at reset with the same path. You can explicitly teach a replacement. |
-| Hybrid / manual finish | Preselects **Keyboard finish after replay**. You can change the option before each take. Hold **Space** plus a displayed shortcut, or use the on-screen jog controls. Select **Finish recording** to review. |
+| Hybrid / manual finish | Preselects **Episode options → Keyboard finish**. You can change the option before each take. Hold **Space** plus a displayed shortcut, or use the on-screen jog controls. Select **Finish recording** to review. |
 
 During keyboard teleoperation, hold **Space** together with a direction key. Releasing **Space** holds the current position.
 
@@ -69,7 +70,7 @@ On the SO-101, direct moves use the servos' acceleration and velocity profiles a
 
 ## Dataset and timing
 
-GhostPath uses the official LeRobot 0.7.0 writer and v3.0 metadata, Parquet, and H.264 videos. Every accepted episode is finalized as a checkpoint before the next one begins. **Finish session** closes the workspace’s collection lifecycle. Everything stays on disk locally. [LeRobotDataset API](https://huggingface.co/docs/lerobot/v0.7.0/api/datasets)
+GhostPath uses the official LeRobot 0.7.0 writer and v3.0 metadata, Parquet, and H.264 videos. Every accepted episode is finalized as a checkpoint before the next one begins. **Session → Finish dataset** closes the workspace’s collection lifecycle. Everything stays on disk locally. [LeRobotDataset API](https://huggingface.co/docs/lerobot/v0.7.0/api/datasets)
 
 | Field | Contents |
 | --- | --- |

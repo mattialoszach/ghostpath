@@ -1,6 +1,6 @@
 import {
-  Activity, Camera, ChevronDown, ChevronRight, Cpu, Crosshair, Eye, EyeOff, Film, FolderOpen,
-  Layers3, Monitor, Plus, Radio, ScanLine, SlidersHorizontal, Trash2, Video,
+  Activity, Camera, ChevronDown, Cpu, Crosshair, Eye, EyeOff, Film, FolderOpen,
+  Monitor, Plus, Radio, ScanLine, SlidersHorizontal, Trash2, Video,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { jogKeys, keyLabel } from './controls'
@@ -8,9 +8,9 @@ import { camera, elapsed, humanize, jointLabels, joints } from './types'
 import type { CameraSpec, Config, Joint, Send, State } from './types'
 
 const modes = [
-  { value: 'teach', label: 'Teach every episode', detail: 'Guide a new path for each take.' },
-  { value: 'repeat', label: 'Repeat path', detail: 'Reuse the trajectory across takes.' },
-  { value: 'hybrid', label: 'Hybrid / manual finish', detail: 'Add powered jogs after replay.' },
+  { value: 'teach', label: 'Teach every episode' },
+  { value: 'repeat', label: 'Repeat path' },
+  { value: 'hybrid', label: 'Hybrid / manual finish' },
 ] as const
 
 interface Devices {
@@ -27,7 +27,6 @@ export function SetupPanel({ config, change, connect, available }: {
   const [devices, setDevices] = useState<Devices>({ ports: [], calibrations: [] })
   const [scan, setScan] = useState('')
   const [expanded, setExpanded] = useState<number | null>(null)
-  const [advanced, setAdvanced] = useState(false)
   const set = <K extends keyof Config>(key: K, value: Config[K]) => change({ ...config, [key]: value })
   const updateCamera = (index: number, patch: Partial<CameraSpec>) => {
     set('cameras', config.cameras.map((item, i) => i === index ? { ...item, ...patch } : item))
@@ -46,56 +45,55 @@ export function SetupPanel({ config, change, connect, available }: {
     }
   }
 
-  return <aside className="inspector panel setup-panel">
-    <div className="panel-heading">
-      <div className="heading-icon"><SlidersHorizontal size={16} /></div>
-      <div><h2>Session setup</h2><p>Robot, task and capture preferences</p></div>
-    </div>
+  const recorded = config.cameras.filter(camera => camera.record).length
+  const addCamera = () => {
+    const source = [0, 1, 2, 3, 4, 5, 6, 7].find(i =>
+      !config.cameras.some(spec => String(spec.source) === String(i) || spec.name === `camera_${i}`))
+    if (source === undefined) return
+    setExpanded(config.cameras.length)
+    set('cameras', [...config.cameras, camera(`camera_${source}`, source)])
+  }
+  return <section className="panel setup-panel" aria-label="Collection setup">
     <form onSubmit={event => { event.preventDefault(); connect() }} className="setup-form">
-      <div className="form-section">
-        <label className="field">Robot source</label>
-        <div className="segmented" aria-label="Robot source">
-          <button type="button" className={config.device === 'simulation' ? 'selected' : ''} onClick={() => set('device', 'simulation')}><Monitor size={14} /> Simulator</button>
-          <button type="button" className={config.device === 'so101' ? 'selected' : ''} onClick={() => change({ ...config, device: 'so101', fps: config.device === 'simulation' && config.fps === 30 ? 20 : config.fps })}><Cpu size={14} /> SO-101</button>
-        </div>
-        {config.device === 'so101' && <div className="hardware-fields">
-          <label className="field">Serial port
-            <div className="row">
-              <select value={config.port} onChange={e => set('port', e.target.value)} required>
-                <option value="">Select a device</option>
-                {config.port && !devices.ports.some(p => p.port === config.port) && <option value={config.port}>{config.port}</option>}
-                {devices.ports.map(p => <option key={p.port} value={p.port}>{p.port}</option>)}
-              </select>
-              <button type="button" className="button icon-button" onClick={scanPorts} aria-label="Scan serial ports" title="Scan serial ports"><ScanLine size={16} /></button>
+      <div className="setup-basics">
+        <fieldset className="setup-fields">
+          <legend>Robot</legend>
+          <div className="segmented" role="group" aria-label="Robot source">
+            <button type="button" aria-pressed={config.device === 'simulation'} className={config.device === 'simulation' ? 'selected' : ''} onClick={() => set('device', 'simulation')}><Monitor size={14} /> Simulator</button>
+            <button type="button" aria-pressed={config.device === 'so101'} className={config.device === 'so101' ? 'selected' : ''} onClick={() => change({ ...config, device: 'so101', fps: config.device === 'simulation' && config.fps === 30 ? 20 : config.fps })}><Cpu size={14} /> SO-101</button>
+          </div>
+          {config.device === 'so101' && <div className="hardware-fields">
+            <div className="field">
+              <label htmlFor="serial-port">Serial port</label>
+              <div className="row">
+                <select id="serial-port" value={config.port} onChange={e => set('port', e.target.value)} required>
+                  <option value="">Select a device</option>
+                  {config.port && !devices.ports.some(p => p.port === config.port) && <option value={config.port}>{config.port}</option>}
+                  {devices.ports.map(p => <option key={p.port} value={p.port}>{p.port}</option>)}
+                </select>
+                <button type="button" className="button icon-button" onClick={scanPorts} aria-label="Scan serial ports" title="Scan serial ports"><ScanLine size={16} /></button>
+              </div>
             </div>
+            {scan && <p className="hint" role="status">{scan}</p>}
+            <label className="field">LeRobot calibration ID
+              <input value={config.robot_id} onChange={e => set('robot_id', e.target.value)} list="calibrations" required />
+              <datalist id="calibrations">{devices.calibrations.map(id => <option key={id} value={id} />)}</datalist>
+            </label>
+          </div>}
+        </fieldset>
+        <fieldset className="setup-fields">
+          <legend>Dataset</legend>
+          <label className="field">Dataset name
+            <input value={config.dataset} onChange={e => set('dataset', e.target.value)} pattern={String.raw`[a-z0-9][a-z0-9_\-]{0,63}`} required />
           </label>
-          {scan && <p className="hint">{scan}</p>}
-          <label className="field">LeRobot calibration ID
-            <input value={config.robot_id} onChange={e => set('robot_id', e.target.value)} list="calibrations" required />
-            <datalist id="calibrations">{devices.calibrations.map(id => <option key={id} value={id} />)}</datalist>
+          <label className="field">Task description
+            <textarea value={config.task} maxLength={500} rows={2} onChange={event => set('task', event.target.value)} required />
           </label>
-        </div>}
-        <label className="field">Task description
-          <textarea value={config.task} maxLength={500} rows={2} onChange={event => set('task', event.target.value)} required />
-        </label>
-        <label className="field">Collection mode
-          <select value={config.mode} onChange={e => set('mode', e.target.value as Config['mode'])}>
-            {modes.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
-          </select>
-          <span className="hint">{modes.find(mode => mode.value === config.mode)?.detail}</span>
-        </label>
+        </fieldset>
       </div>
-      <div className="form-section">
-        <div className="section-title"><Video size={15} /><h3>Camera sources</h3>
-          <button className="icon-button bare" type="button" aria-label="Add camera" title="Add camera" disabled={config.cameras.length >= 4} onClick={() => {
-            const source = [0, 1, 2, 3, 4, 5, 6, 7].find(i =>
-              !config.cameras.some(item => String(item.source) === String(i) || item.name === `camera_${i}`))
-            if (source !== undefined) {
-              setExpanded(config.cameras.length)
-              set('cameras', [...config.cameras, camera(`camera_${source}`, source)])
-            }
-          }}><Plus size={16} /></button>
-        </div>
+      <details className="setup-section">
+        <summary><Video size={16} /> Cameras <span className="disclosure-value">{recorded} recorded</span><ChevronDown size={14} /></summary>
+        <div className="setup-section-content">
         <div className="camera-settings">
           {config.cameras.map((spec, index) => <div className="camera-setting" key={index}>
             <div className="camera-option">
@@ -120,80 +118,59 @@ export function SetupPanel({ config, change, connect, available }: {
           </div>)}
           {!config.cameras.length && <p className="hint">Joint telemetry only.</p>}
         </div>
-      </div>
-      <div className="form-section setup-bottom">
-        <div className="split">
-          <label className="field">Dataset FPS<select value={config.fps} onChange={e => set('fps', Number(e.target.value))}><option>10</option><option>15</option><option>20</option><option>24</option><option>30</option></select></label>
-          <label className="field">Replay speed<select value={config.speed} onChange={e => set('speed', Number(e.target.value))}>
-            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(n => <option key={n} value={n}>{n === 1 ? '1.0' : n}×</option>)}
-          </select></label>
+          <button type="button" className="text-button" disabled={config.cameras.length >= 4} onClick={addCamera}><Plus size={14} /> Add camera</button>
         </div>
-        <p className="hint">Start at 20 FPS for this arm. Use 30 FPS when all recorded cameras can sustain it.</p>
-        <button type="button" className="text-button preferences-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><ChevronRight size={13} className={advanced ? 'rotate-right' : ''} /> More preferences</button>
-        {advanced && <div className="advanced-fields">
-          <label className="field">Dataset name<input value={config.dataset} onChange={e => set('dataset', e.target.value)} pattern={String.raw`[a-z0-9][a-z0-9_\-]{0,63}`} required /></label>
+      </details>
+      <details className="setup-section">
+        <summary><SlidersHorizontal size={16} /> Capture preferences <span className="disclosure-value">{config.fps} FPS</span><ChevronDown size={14} /></summary>
+        <div className="setup-section-content">
+          <div className="split">
+            <label className="field">Dataset FPS<select value={config.fps} onChange={e => set('fps', Number(e.target.value))}><option>10</option><option>15</option><option>20</option><option>24</option><option>30</option></select></label>
+            <label className="field">Replay speed<select value={config.speed} onChange={e => set('speed', Number(e.target.value))}>
+              {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(n => <option key={n} value={n}>{n === 1 ? '1.0' : n}×</option>)}
+            </select></label>
+          </div>
+          <label className="field">Collection mode
+            <select value={config.mode} onChange={e => set('mode', e.target.value as Config['mode'])}>
+              {modes.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+            </select>
+          </label>
           {config.device === 'so101' && <>
             <label className="field">Calibration directory<input value={config.calibration_dir ?? ''} onChange={e => set('calibration_dir', e.target.value || null)} placeholder="Default LeRobot directory" /></label>
             <label className="check"><input type="checkbox" checked={config.automatic_reset} onChange={e => set('automatic_reset', e.target.checked)} /> Allow automatic arm reset</label>
           </>}
-        </div>}
-        <button className="button primary full" type="submit" disabled={!available}>
-          <Radio size={16} /> {config.device === 'simulation' ? 'Connect simulator' : 'Connect SO-101'}<ChevronRight size={16} className="push" />
-        </button>
+        </div>
+      </details>
+      <div className="setup-actions">
+        <button className="button primary" type="submit" disabled={!available}><Radio size={16} /> {config.device === 'simulation' ? 'Connect simulator' : 'Connect SO-101'}</button>
       </div>
     </form>
-  </aside>
+  </section>
 }
 
-export function Telemetry({ state, config, disconnect, available }: {
-  state: State | null
-  config: Config
-  disconnect: () => void
-  available: boolean
-}) {
-  const [view, setView] = useState<'joints' | 'settings'>('joints')
+export function Telemetry({ state }: { state: State | null }) {
   const resetTarget = state && ['ready', 'teach_paused', 'reset', 'reset_released', 'returning'].includes(state.phase)
     ? state.reset_target : null
-  return <aside className="inspector panel">
-    <div className="panel-heading">
-      <div className="heading-icon"><Activity size={16} /></div>
-      <div><h2>Device monitor</h2><p>Robot feedback and capture setup</p></div>
-    </div>
+  return <section className="panel">
+    <div className="panel-heading"><h2>Joint readings</h2></div>
     <div className="monitor-content">
-      <div className="segmented">
-        <button type="button" className={view === 'joints' ? 'selected' : ''} onClick={() => setView('joints')}><Activity size={14} /> Joints</button>
-        <button type="button" className={view === 'settings' ? 'selected' : ''} onClick={() => setView('settings')}><SlidersHorizontal size={14} /> Session</button>
+      <div className="joint-list">
+        {joints.map(joint => {
+          const value = state?.pose?.[joint]
+          const target = resetTarget?.[joint]
+          const unit = joint === 'gripper' ? '%' : '°'
+          const [min, max] = state?.limits?.[joint] ?? [-100, 100]
+          const ratio = value === undefined ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)))
+          return <div className="joint" key={joint}>
+            <div><span>{jointLabels[joint]}</span><output>{value === undefined ? '—' : `${value.toFixed(1)}${unit}`}</output></div>
+            <div className="joint-track"><span style={{ width: `${ratio * 100}%` }} /></div>
+            {target !== undefined && <span className="joint-target">Target {target.toFixed(1)}{unit}</span>}
+          </div>
+        })}
       </div>
-      {view === 'joints' ? <>
-        <div className="joint-list">
-          {joints.map(joint => {
-            const value = state?.pose?.[joint]
-            const target = resetTarget?.[joint]
-            const unit = joint === 'gripper' ? '%' : '°'
-            const [min, max] = state?.limits?.[joint] ?? [-100, 100]
-            const ratio = value === undefined ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)))
-            return <div className="joint" key={joint}>
-              <div><span>{jointLabels[joint]}</span><output>{value === undefined ? '—' : `${value.toFixed(1)}${unit}`}</output></div>
-              <div className="joint-track"><span style={{ width: `${ratio * 100}%` }} /></div>
-              {target !== undefined && <span className="joint-target">Target {target.toFixed(1)}{unit}</span>}
-            </div>
-          })}
-        </div>
-        <div className="pose-status"><Crosshair size={16} /><div><strong>{state?.at_start ? 'At start pose' : state?.reset_target ? 'Away from start' : 'Choose a start pose'}</strong><p>{state?.reset_target ? 'Compared with the target joint positions' : 'Use the position controls in the workflow'}</p></div></div>
-      </> : <>
-        <dl className="session-specs">
-          <dt>Robot</dt><dd>{config.device === 'simulation' ? 'Simulator' : config.robot_id}</dd>
-          <dt>Mode</dt><dd>{modes.find(mode => mode.value === config.mode)?.label}</dd>
-          <dt>Task</dt><dd>{config.task}</dd>
-          <dt>Dataset</dt><dd>{config.dataset}</dd>
-          <dt>Capture</dt><dd>{config.fps} FPS · {config.speed}× replay</dd>
-          <dt>Recorded</dt><dd>{config.cameras.filter(c => c.record).map(c => humanize(c.name)).join(', ') || 'Joints only'}</dd>
-        </dl>
-        <button className="button full" disabled={!available} onClick={disconnect}><Radio size={14} /> Disconnect robot</button>
-      </>}
-      <div className="monitor-foot"><Layers3 size={14} /> LeRobotDataset <span>v3.0</span></div>
+      {resetTarget && <div className="pose-status"><Crosshair size={16} /><strong>{state?.at_start ? 'At start pose' : 'Away from start pose'}</strong></div>}
     </div>
-  </aside>
+  </section>
 }
 
 function useCameraFrame(name: string, active: boolean, live: boolean, review?: number) {
@@ -273,12 +250,9 @@ export function CameraPanel({ config, state, online, reviewIndex }: {
   config: Config, state: State | null, online: boolean, reviewIndex: number
 }) {
   const review = state?.phase === 'review' ? reviewIndex : undefined
-  const count = config.cameras.filter(c => c.record).length
   return <section className="panel camera-panel" aria-label="Camera monitor">
     <div className="panel-heading">
-      <div className="heading-icon"><Video size={16} /></div>
-      <div><h2>Camera monitor</h2><p>{review === undefined ? 'Preview your capture sources' : 'Review staged camera frames'}</p></div>
-      <span className="meta-pill push"><i className={count ? 'warm' : ''} />{count} selected</span>
+      <h2>{review === undefined ? 'Cameras' : 'Recorded views'}</h2>
     </div>
     {config.cameras.length ? <div className="camera-grid">
       {config.cameras.map(spec => <CameraTile key={spec.name} spec={spec} state={state} demo={config.device === 'simulation'} online={online} review={review} />)}
