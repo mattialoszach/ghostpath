@@ -168,11 +168,8 @@ class Datasets:
         times = []
         previews = []
         review_interval = max(1, round(self.config.fps / 5))
-        for spec in self.cameras.recorded:
-            capture = self.cameras.frame(
-                spec, stamp, record.state, period, self.indices.get(spec.name, -1)
-            )
-            self.indices[spec.name] = capture.sequence
+        captures = self.cameras.frames(stamp, state, period, self.indices)
+        for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
             if capture.pixels.shape != (spec.height, spec.width, 3):
                 raise ValueError(f"{spec.name}: unexpected frame dimensions")
@@ -183,14 +180,16 @@ class Datasets:
                 previews.append((spec.name, capture.pixels))
         if times:
             skew = max(times) - min(times)
-            if skew > period * 0.9:
-                raise ValueError("camera-to-camera skew is too high")
             self.max_skew = max(self.max_skew, skew)
             self.max_sensor_offset = max(self.max_sensor_offset, *(abs(t - stamp) for t in times))
             frame["ghostpath.camera_timestamps"] = np.array(
                 [t - self.started for t in times], np.float64
             )
         self.dataset.add_frame(frame)
+        self.indices.update(
+            (spec.name, capture.sequence)
+            for spec, capture in zip(self.cameras.recorded, captures, strict=True)
+        )
         for name, pixels in previews:
             path = Path(self.review_dir.name) / f"{name}-{self.review_frames}.jpg"
             path.write_bytes(jpeg(Image.fromarray(pixels), small=True))

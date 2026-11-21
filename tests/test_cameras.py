@@ -4,6 +4,7 @@ import sys
 from threading import Thread
 from time import monotonic, sleep
 
+import numpy as np
 import pytest
 
 from ghostpath import cameras
@@ -43,6 +44,26 @@ def test_macos_source_stays_bound_to_physical_camera():
     )
 
 
+@pytest.mark.parametrize(
+    ("after", "error"),
+    [
+        ({}, r"skew is too high for the 45 ms limit.*workspace -40.0 ms, wrist \+43.0 ms"),
+        ({"workspace": 0}, r"workspace: no unused camera frame within 45 ms"),
+    ],
+)
+def test_pairing_rejects_excess_skew_or_a_reused_frame(after, error):
+    manager = cameras.Cameras(
+        [CameraSpec(name="workspace", source=0), CameraSpec(name="wrist", source=1)],
+        simulation=False,
+    )
+    stamp = monotonic() - 1
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    for name, offset in (("workspace", -0.040), ("wrist", 0.043)):
+        manager.captures[name].history.append(cameras.CameraFrame(0, stamp + offset, image))
+    with pytest.raises(ValueError, match=error):
+        manager.frames(stamp, {}, 0.05, after)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Requires inherited Unix sockets")
 def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
     workers = []
@@ -70,7 +91,9 @@ def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
         wait_for(lambda: capture.status()["retrying"])
         assert capture.live_preview() is None
         with pytest.raises(ValueError, match="stopped delivering frames"):
-            capture.nearest(first.timestamp, -1, 0.1)
+            capture.candidates(
+                first.timestamp, -1, 0.1, through=first.timestamp, deadline=first.timestamp
+            )
 
         wait_for(lambda: len(workers) >= 2 and capture.live_preview() is not None)
         assert workers[0].poll() is not None

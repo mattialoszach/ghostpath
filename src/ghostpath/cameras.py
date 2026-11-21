@@ -21,6 +21,7 @@ from .preview import render_camera
 
 STALE_AFTER = 0.30
 REOPEN_DELAY = 1.0
+FRAME_DELIVERY_GRACE = 0.012
 
 
 def source_index(value: int | str) -> int | str:
@@ -79,6 +80,41 @@ class CameraFrame:
     sequence: int
     timestamp: float
     pixels: np.ndarray
+
+
+def _match_frames(
+    groups: list[list[CameraFrame]], stamp: float, tolerance: float
+) -> list[CameraFrame] | None:
+    if not groups or not all(groups):
+        return None
+
+    def closest(frames: list[CameraFrame]) -> CameraFrame:
+        return min(frames, key=lambda frame: (abs(frame.timestamp - stamp), frame.sequence))
+
+    nearest = [closest(frames) for frames in groups]
+    times = [frame.timestamp for frame in nearest]
+    if max(times) <= min(times) + tolerance:
+        return nearest
+
+    # A feasible set lies in a window starting at one of the candidate times.
+    # Within each window, the closest frame from each camera minimizes the offset.
+    starts = sorted({frame.timestamp for frames in groups for frame in frames})
+    best = None
+    best_score = (float("inf"), float("inf"), float("inf"))
+    for start in starts:
+        window = [
+            [frame for frame in frames if start <= frame.timestamp <= start + tolerance]
+            for frames in groups
+        ]
+        if not all(window):
+            continue
+        match = [closest(frames) for frames in window]
+        offsets = [abs(frame.timestamp - stamp) for frame in match]
+        times = [frame.timestamp for frame in match]
+        score = (max(offsets), sum(offsets), max(times) - min(times))
+        if score < best_score:
+            best, best_score = match, score
+    return best
 
 
 class Capture:
@@ -208,29 +244,27 @@ class Capture:
         with self.condition:
             return self.preview if self._fresh(time.monotonic()) else None
 
-    def nearest(self, stamp: float, after: int, tolerance: float) -> CameraFrame:
-        deadline = stamp + tolerance
+    def candidates(
+        self, stamp: float, after: int, tolerance: float, *, through: float, deadline: float
+    ) -> list[CameraFrame]:
         with self.condition:
             while not self.closed.is_set() and not self.problem:
-                now = time.monotonic()
                 ready = (
                     self.history
                     and self.history[-1].sequence > after
-                    and self.history[-1].timestamp >= stamp
+                    and self.history[-1].timestamp >= through
                 )
-                if ready or now >= deadline:
+                remaining = deadline - time.monotonic()
+                if ready or remaining <= 0:
                     break
-                self.condition.wait(deadline - now)
-            candidates = [
+                self.condition.wait(remaining)
+            if self.closed.is_set() or self.problem:
+                raise ValueError(f"{self.spec.name}: {self.problem or 'camera capture closed'}")
+            return [
                 f
                 for f in self.history
-                if f.sequence > after and abs(f.timestamp - stamp) <= tolerance
+                if f.sequence > after and stamp - tolerance <= f.timestamp <= stamp + tolerance
             ]
-            if not candidates or self.closed.is_set() or self.problem:
-                raise ValueError(
-                    f"{self.spec.name}: {self.problem or 'missing synchronized frame'}"
-                )
-            return min(candidates, key=lambda f: abs(f.timestamp - stamp))
 
     def status(self) -> dict:
         with self.condition:
@@ -295,13 +329,65 @@ class Cameras:
             if status["fps"] < fps * 0.95:
                 raise ValueError(f"{spec.name}: capture is too slow. Lower the dataset FPS.")
 
-    def frame(
-        self, spec: CameraSpec, timestamp: float, pose: Pose, period: float, after: int
-    ) -> CameraFrame:
+    def frames(
+        self, timestamp: float, pose: Pose, period: float, after: dict[str, int]
+    ) -> list[CameraFrame]:
+        if not self.recorded:
+            return []
         if self.simulation:
-            image = render_camera(pose, spec.width, spec.height, self.indices[spec.name])
-            return CameraFrame(after + 1, timestamp, np.asarray(image))
-        return self.captures[spec.name].nearest(timestamp, after, period * 0.9)
+            return [
+                CameraFrame(
+                    after.get(spec.name, -1) + 1,
+                    timestamp,
+                    np.asarray(
+                        render_camera(pose, spec.width, spec.height, self.indices[spec.name])
+                    ),
+                )
+                for spec in self.recorded
+            ]
+
+        tolerance = period * 0.9
+        cutoff = timestamp + tolerance
+        deadline = cutoff + FRAME_DELIVERY_GRACE
+
+        def collect(through: float) -> list[list[CameraFrame]]:
+            return [
+                self.captures[spec.name].candidates(
+                    timestamp,
+                    after.get(spec.name, -1),
+                    tolerance,
+                    through=through,
+                    deadline=deadline,
+                )
+                for spec in self.recorded
+            ]
+
+        groups = collect(timestamp)
+        if match := _match_frames(groups, timestamp, tolerance):
+            return match
+
+        # A camera may still deliver a compatible frame before the sampling
+        # window closes. Keep earlier candidates even if its history rolls over.
+        groups = [
+            list({frame.sequence: frame for frame in (*early, *late)}.values())
+            for early, late in zip(groups, collect(cutoff), strict=True)
+        ]
+        for spec, frames in zip(self.recorded, groups, strict=True):
+            if not frames:
+                raise ValueError(
+                    f"{spec.name}: no unused camera frame within {tolerance * 1000:.0f} ms"
+                    " of the robot sample"
+                )
+        if match := _match_frames(groups, timestamp, tolerance):
+            return match
+        offsets = ", ".join(
+            f"{spec.name} {min((f.timestamp - timestamp for f in frames), key=abs) * 1000:+.1f} ms"
+            for spec, frames in zip(self.recorded, groups, strict=True)
+        )
+        raise ValueError(
+            f"camera-to-camera skew is too high for the {tolerance * 1000:.0f} ms limit "
+            f"(nearest individual frames relative to the robot sample: {offsets})"
+        )
 
     def close(self):
         self.closed.set()

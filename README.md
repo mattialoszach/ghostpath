@@ -82,7 +82,7 @@ GhostPath uses the official LeRobot 0.7.0 writer and v3.0 metadata, Parquet, and
 | `ghostpath.manual` | True for powered manual continuation frames. |
 | Episode, frame and task indices | Standard LeRobot indices and task metadata. |
 
-Joints are ordered `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`. Feature names use LeRobot’s `.pos` suffix. Arm joints use degrees and the gripper uses percent of calibrated travel. Hardware camera timestamps reflect host arrival. Frame pairing checks distinct frames, timing gaps, image shape, and camera skew. This is software synchronization across independent devices. Raw teaching lives in `data/paths/` as passive encoder samples and is kept out of active action labels. A `ghostpath.json` manifest lists the raw path and capture quality for each accepted episode.
+Joints are ordered `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`. Feature names use LeRobot’s `.pos` suffix. Arm joints use degrees and the gripper uses percent of calibrated travel. Hardware camera timestamps reflect host arrival. GhostPath selects a set of unused frames together, within 90% of one dataset frame interval of the robot sample and of each other. This is software synchronization across independent devices. Raw teaching lives in `data/paths/` as passive encoder samples and is kept out of active action labels. A `ghostpath.json` manifest lists the raw path and capture quality for each accepted episode.
 
 Open a saved dataset with LeRobot directly:
 

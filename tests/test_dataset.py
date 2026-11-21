@@ -1,6 +1,9 @@
+from time import monotonic
+
+import numpy as np
 import pytest
 
-from ghostpath.cameras import Cameras
+from ghostpath.cameras import CameraFrame, Cameras
 from ghostpath.dataset import Datasets, Record
 from ghostpath.models import CameraSpec, Configuration
 from ghostpath.robot import SimulatedFollower
@@ -86,3 +89,41 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     with pytest.raises(ValueError, match="missed a recording deadline"):
         writer.seal().result(timeout=30)
     assert writer.accepted == 0
+
+
+def test_joint_pairing_saves_an_episode_when_individual_nearest_frames_are_too_far_apart(tmp_path):
+    module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    config = Configuration(
+        fps=20,
+        cameras=[
+            CameraSpec(name="workspace", source=0, width=160, height=120),
+            CameraSpec(name="wrist", source=1, width=160, height=120),
+        ],
+    )
+    cameras = Cameras(config.cameras, simulation=False)
+    store = Datasets(tmp_path / "paired", config, cameras)
+    stamp = monotonic() - 0.17
+    streams = {"workspace": [-0.024, 0.038, 0.080, 0.120], "wrist": [-0.041, 0.025, 0.072, 0.112]}
+    try:
+        for name, offsets in streams.items():
+            capture = cameras.captures[name]
+            capture.actual = 30.0
+            for i, offset in enumerate(offsets):
+                pixels = np.full((120, 160, 3), 20 * i, dtype=np.uint8)
+                capture.history.append(CameraFrame(i, stamp + offset, pixels))
+        store.prepare().result(timeout=30)
+        pose = SimulatedFollower(CONTROL).read()
+        for i in range(3):
+            store.offer(Record(stamp + i / 20, pose, pose, False))
+        assert store.seal().result(timeout=30)["camera_skew_ms"] == pytest.approx(13.0)
+        store.save("paired-cameras", "teach").result(timeout=30)
+        store.finalize().result(timeout=30)
+
+        dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
+        assert dataset.num_frames == 3
+        for row, expected in zip(
+            dataset, [(0.038, 0.025), (0.080, 0.072), (0.120, 0.112)], strict=True
+        ):
+            assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(expected)
+    finally:
+        store.close()
