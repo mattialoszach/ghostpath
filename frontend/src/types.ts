@@ -6,6 +6,11 @@ export type Phase = 'setup' | 'ready' | 'teaching' | 'teach_paused' | 'reset' | 
 export type Mode = 'teach' | 'repeat' | 'hybrid'
 export type ReplayProfile = 'standard' | 'fast'
 
+export const replayProfileLabels: Record<ReplayProfile, string> = {
+  standard: 'Standard limits',
+  fast: 'Higher limits',
+}
+
 export interface CameraSpec {
   name: string
   source: number | string

@@ -12,7 +12,7 @@ import {
   VirtualJoints,
 } from './panels'
 import { useWorkspace } from './socket'
-import { defaults, elapsed, jointLabels } from './types'
+import { defaults, elapsed, jointLabels, replayProfileLabels } from './types'
 import type { Config, Phase, Send, State } from './types'
 import './styles.css'
 
@@ -242,7 +242,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       extra = <>
         {paused && !state?.can_continue && <p className="hint">Continuing requires the arm at the paused endpoint and teaching time remaining.</p>}
         {state?.path && state.path.replay_profile !== state.config.replay_profile &&
-          <p className="hint">This path uses the {state.path.replay_profile} motion profile from its saved grip edits.</p>}
+          <p className="hint">This path uses the {replayProfileLabels[state.path.replay_profile].toLowerCase()} saved with its grip edits.</p>}
         {state?.notice.startsWith('Recording stopped before') && <p className="hint">{state.notice}</p>}
         {state?.notice.startsWith('Recording could not start') && <p className="hint" role="status">{state.notice}</p>}
         {hasPath && <details className="episode-options">

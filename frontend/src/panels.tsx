@@ -4,7 +4,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { jogKeys, keyLabel } from './controls'
-import { camera, elapsed, humanize, jointLabels, joints } from './types'
+import { camera, elapsed, humanize, jointLabels, joints, replayProfileLabels } from './types'
 import type { CameraSpec, Config, Joint, Send, State } from './types'
 
 const modes = [
@@ -126,21 +126,25 @@ export function SetupPanel({ config, change, connect, available }: {
         <div className="setup-section-content">
           <div className="split">
             <label className="field">Dataset FPS<select value={config.fps} onChange={e => set('fps', Number(e.target.value))}><option>10</option><option>15</option><option>20</option><option>24</option><option>30</option></select></label>
-            <label className="field">Replay speed<select value={config.speed} onChange={e => set('speed', Number(e.target.value))}>
-              {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(n => <option key={n} value={n}>{n === 1 ? '1.0' : n}×</option>)}
-            </select></label>
+            <label className="field">Collection mode
+              <select value={config.mode} onChange={e => set('mode', e.target.value as Config['mode'])}>
+                {modes.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+              </select>
+            </label>
           </div>
-          <label className="field">Taught-path motion profile
-            <select value={config.replay_profile} onChange={e => set('replay_profile', e.target.value as Config['replay_profile'])}>
-              <option value="standard">Standard</option>
-              <option value="fast">Fast · closer to teaching</option>
-            </select>
-          </label>
-          <label className="field">Collection mode
-            <select value={config.mode} onChange={e => set('mode', e.target.value as Config['mode'])}>
-              {modes.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
-            </select>
-          </label>
+          <div className="split">
+            <label className="field">Target replay pace
+              <select value={config.speed} onChange={e => set('speed', Number(e.target.value))} aria-describedby="replay-timing-hint">
+                {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(n => <option key={n} value={n}>{n === 1 ? '1× · Teaching pace' : `${n}×`}</option>)}
+              </select>
+            </label>
+            <label className="field">Replay speed and acceleration limits
+              <select value={config.replay_profile} onChange={e => set('replay_profile', e.target.value as Config['replay_profile'])} aria-describedby="replay-timing-hint">
+                {Object.entries(replayProfileLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+          </div>
+          <p className="hint" id="replay-timing-hint">Replay can run slower than the target pace to stay within these limits.</p>
           {config.device === 'so101' && <>
             <label className="field">Calibration directory<input value={config.calibration_dir ?? ''} onChange={e => set('calibration_dir', e.target.value || null)} placeholder="Default LeRobot directory" /></label>
             <label className="check"><input type="checkbox" checked={config.automatic_reset} onChange={e => set('automatic_reset', e.target.checked)} /> Allow automatic arm reset</label>
