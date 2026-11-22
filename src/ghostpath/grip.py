@@ -59,6 +59,7 @@ class GrippedPath:
         self.base, self.knots = base, knots
         self.start, self.end = base.start, base.end
         self.keyframes = base.keyframes
+        self.teaching_duration = base.teaching_duration
         if not 2 <= len(knots) <= 7000 or knots[0] != (0, 0) or knots[-1] != (1, 0):
             raise ValueError("Invalid gripper edit endpoints.")
         for i, (fraction, offset) in enumerate(knots):

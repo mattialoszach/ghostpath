@@ -14,6 +14,8 @@ START_TOLERANCE = 2.0
 GRIPPER_TOLERANCE = 2.5
 LOAD_AXES = ("shoulder_lift", "elbow_flex")
 TRIM_LIMIT = 4.5
+REPLAY_RATE_DECEL = 2.5
+REPLAY_RATE_ACCEL = 1.4
 
 
 class Path(Protocol):
@@ -98,31 +100,58 @@ def _anchors(samples: list[Sample]) -> list[int]:
     return sorted(required)
 
 
-def _tangents(values: list[float], spans: list[float]) -> list[float]:
+def _tangents(values: list[float], spans: list[float], cap: float) -> list[float]:
     slopes = [(b - a) / h for a, b, h in zip(values[:-1], values[1:], spans, strict=True)]
     result = [0.0]
     for before, after in zip(slopes, slopes[1:], strict=False):
         if before * after <= 0:
             result.append(0.0)
         else:
-            # A harmonic mean gives continuous velocity. Cap it so the Bézier
-            # control points stay ordered and cannot overshoot either knot.
+            # The harmonic mean keeps velocity continuous without pulling a
+            # slow segment along at the pace of its faster neighbor.
             mean = 2 * before * after / (before + after)
-            limit = 1.20 * min(abs(before), abs(after))
+            limit = cap * min(abs(before), abs(after))
             result.append(max(-limit, min(limit, mean)))
     return [*result, 0.0]
 
 
-def _bernstein_peak(points: tuple[float, ...], depth: int = 2) -> float:
-    """Bound a polynomial using subdivided Bézier control polygons."""
+def _bernstein_segments(points: tuple[float, ...], depth: int):
     if not depth:
-        return max(map(abs, points))
+        yield points
+        return
     left, right = [points[0]], [points[-1]]
     while len(points) > 1:
         points = tuple((a + b) / 2 for a, b in zip(points, points[1:], strict=False))
         left.append(points[0])
         right.append(points[-1])
-    return max(_bernstein_peak(tuple(left), depth - 1), _bernstein_peak(tuple(right), depth - 1))
+    yield from _bernstein_segments(tuple(left), depth - 1)
+    yield from _bernstein_segments(tuple(reversed(right)), depth - 1)
+
+
+def _bernstein_peak(points: tuple[float, ...], depth: int = 2) -> float:
+    """Bound a polynomial using subdivided Bézier control polygons."""
+    return max(abs(point) for segment in _bernstein_segments(points, depth) for point in segment)
+
+
+def _arm_span_scale(
+    u: float, middle: float, v: float, span: float, speed_limit: float, accel_limit: float
+) -> float:
+    velocity = (u, u, middle, v, v)
+    # Express the cubic acceleration in the same Bernstein basis as velocity
+    # so their bounds account for where in the segment each peak occurs.
+    acceleration = (0, 3 * (middle - u), 2 * (v - u), 3 * (v - middle), 0)
+    scale = 0.0
+    for speeds, accels in zip(
+        _bernstein_segments(velocity, 2), _bernstein_segments(acceleration, 2), strict=True
+    ):
+        for speed, accel in zip(speeds, accels, strict=True):
+            speed = abs(speed) / span
+            # With dilation s, acceleration under feedback pacing is bounded
+            # by a/s² + b/s. This covers both forward and reverse playback.
+            a = abs(accel) / (span**2 * accel_limit)
+            b = max(REPLAY_RATE_DECEL, REPLAY_RATE_ACCEL) * speed / accel_limit
+            scale = max(scale, speed / speed_limit, (b + sqrt(b**2 + 4 * a)) / 2)
+    return scale
 
 
 class ReplayPath:
@@ -135,6 +164,7 @@ class ReplayPath:
         *,
         joint_margin: float = 0,
         start_pose: Pose | None = None,
+        legacy_timing: bool = False,
     ):
         if len(samples) < 3 or samples[-1].t - samples[0].t < 0.25:
             raise ValueError("Teach for at least a quarter of a second.")
@@ -155,19 +185,54 @@ class ReplayPath:
             poses[0] = automatic_pose(start_pose, motion, joint_margin)
         self.start, self.end = poses[0], poses[-1]
         self.keyframes = len(anchors)
+        self.teaching_duration = anchors[-1].t - anchors[0].t
+        self.legacy_timing = legacy_timing
         if max(abs(p[j] - poses[0][j]) for p in poses for j in JOINTS) < 0.5:
             raise ValueError("No movement detected within the replay limits.")
-        spans = [max(0.12, (b.t - a.t) / speed) for a, b in zip(anchors, anchors[1:], strict=False)]
+        minimum_span = 0.12 if legacy_timing else 2 / settings.fps
+        nominal = [
+            max(minimum_span, (b.t - a.t) / speed)
+            for a, b in zip(anchors, anchors[1:], strict=False)
+        ]
         tracks = {j: [pose[j] for pose in poses] for j in JOINTS}
         for j, values in tracks.items():
             if max(values) - min(values) < (0.6 if j == "gripper" else 0.55):
-                time_total = anchors[-1].t - anchors[0].t
                 tracks[j] = [
-                    values[0] + (values[-1] - values[0]) * (s.t - anchors[0].t) / time_total
+                    values[0]
+                    + (values[-1] - values[0]) * (s.t - anchors[0].t) / self.teaching_duration
                     for s in anchors
                 ]
-        # Only lengthen the intervals causing a limit violation. Shared knot
-        # velocities are recomputed whenever a neighboring interval changes.
+        self.curves, spans = self._retime(tracks, nominal, settings)
+        self.times = [0.0]
+        for span in spans:
+            self.times.append(self.times[-1] + span)
+        self.duration = self.times[-1]
+        if self.duration > MAX_REPLAY_SECONDS:
+            raise ValueError("The bounded replay would exceed 10 minutes. Teach a shorter path.")
+
+    def _retime(self, tracks: dict[str, list[float]], nominal: list[float], settings: Settings):
+        spans = nominal
+        if not self.legacy_timing:
+            curves, scales = self._fit(tracks, spans, settings)
+            for _ in range(18):
+                # Adjacent intervals share knot velocities. Reclaim excess time
+                # when a neighboring fit frees it, down to the taught cadence.
+                revised = [
+                    max(original, h * scale**0.35)
+                    for original, h, scale in zip(nominal, spans, scales, strict=True)
+                ]
+                if all(
+                    abs(new - old) <= old * 0.0001 for new, old in zip(revised, spans, strict=True)
+                ):
+                    break
+                spans = revised
+                curves, scales = self._fit(tracks, spans, settings)
+            # Uniform dilation keeps the fitted shape and shared derivatives.
+            scale = max(1.0, max(scales))
+            return curves, [h * scale for h in spans]
+
+        # Older grip edits are indexed by the original fitted time. Reproduce
+        # that clock so the saved closure still happens at the same arm pose.
         for _ in range(10):
             curves, scales = self._fit(tracks, spans, settings)
             if max(scales) <= 1.00001:
@@ -178,23 +243,19 @@ class ReplayPath:
             ]
         else:
             curves, scales = self._fit(tracks, spans, settings)
-            # A shared fallback scale preserves continuity without another fit.
             spans = [h * max(scales) for h in spans]
-        self.curves = curves
-        self.times = [0.0]
-        for span in spans:
-            self.times.append(self.times[-1] + span)
-        self.duration = self.times[-1]
-        if self.duration > MAX_REPLAY_SECONDS:
-            raise ValueError("The bounded replay would exceed 10 minutes. Teach a shorter path.")
+        return curves, spans
 
-    @staticmethod
-    def _fit(tracks: dict[str, list[float]], spans: list[float], settings: Settings):
-        scales = [1.0] * len(spans)
+    def _fit(self, tracks: dict[str, list[float]], spans: list[float], settings: Settings):
+        scales = [0.0] * len(spans)
         curves: dict[str, list[tuple[float, float, float, float, float]]] = {}
         for j, values in tracks.items():
-            tangents = _tangents(values, spans)
+            # With each endpoint tangent at most twice the secant, the
+            # derivative's Bézier controls after midpoint subdivision all
+            # have the sign of the secant. Each joint stays between its knots.
+            tangents = _tangents(values, spans, cap=1.2 if self.legacy_timing else 2.0)
             curves[j] = []
+            speed_limit, accel_limit = settings.velocity(j), settings.accel(j)
             for i, h in enumerate(spans):
                 p0, p1 = values[i], values[i + 1]
                 delta = p1 - p0
@@ -205,15 +266,21 @@ class ReplayPath:
                 b = -15 * delta + 8 * u + 7 * v
                 c = 10 * delta - 6 * u - 4 * v
                 curves[j].append((a, b, c, u, p0))
+                if not delta:
+                    continue
                 middle = 5 * delta - 2 * (u + v)
-                velocity = _bernstein_peak((u, u, middle, v, v)) / h
-                acceleration = _bernstein_peak((0, 4 * (middle - u), 4 * (v - middle), 0)) / h**2
-                # Reserve acceleration for feedback-driven changes of path speed.
-                scales[i] = max(
-                    scales[i],
-                    velocity / (0.65 * settings.velocity(j)),
-                    sqrt(acceleration / (0.48 * settings.accel(j))),
-                )
+                if self.legacy_timing or j == "gripper":
+                    # Leave headroom for additional closure applied during carries.
+                    velocity = _bernstein_peak((u, u, middle, v, v)) / h
+                    acceleration = (
+                        _bernstein_peak((0, 4 * (middle - u), 4 * (v - middle), 0)) / h**2
+                    )
+                    scale = max(
+                        velocity / (0.65 * speed_limit), sqrt(acceleration / (0.48 * accel_limit))
+                    )
+                else:
+                    scale = _arm_span_scale(u, middle, v, h, 0.90 * speed_limit, 0.95 * accel_limit)
+                scales[i] = max(scales[i], scale)
         return curves, scales
 
     def at(self, elapsed: float) -> Pose:
@@ -314,7 +381,9 @@ class Player:
             # No catch-up jumps after scheduling delays.
             step = min(dt, 1.3 / settings.fps)
             previous_rate = self.rate
-            self.rate += max(-2.5 * step, min(1.4 * step, desired - self.rate))
+            self.rate += max(
+                -REPLAY_RATE_DECEL * step, min(REPLAY_RATE_ACCEL * step, desired - self.rate)
+            )
             self.cursor = min(
                 self.path.duration, self.cursor + step * (self.rate + previous_rate) / 2
             )

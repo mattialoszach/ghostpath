@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from ghostpath.api import create_app
 from ghostpath.cameras import CameraNotReady, Cameras
-from ghostpath.grip import CarryGripPath
+from ghostpath.grip import CarryGripPath, GrippedPath
 from ghostpath.models import Command, Configuration, Phase
 from ghostpath.motion import JOINTS, Motion
 from ghostpath.poses import write_json
@@ -313,7 +313,8 @@ def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
             ws.send_json({"action": "connect", "config": {"cameras": [], "fps": 20}})
             wait_for(ws, lambda s: s["phase"] == "ready")
             ws.send_json({"action": "load_path", "path_id": save_id})
-            wait_for(ws, lambda s: s["phase"] == "reset" and s["at_start"])
+            ready = wait_for(ws, lambda s: s["phase"] == "reset" and s["at_start"])
+            assert ready["path"]["teaching_duration"] == 0.65
             ws.send_json({"action": "replay", "manual_finish": True})
             aligning = wait_for(ws, lambda s: s["replay_stage"] == "aligning" and s["frames"] > 0)
             assert aligning["recording"]
@@ -338,6 +339,41 @@ def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
     assert dataset[0]["observation.state"][3].item() == pytest.approx(0, abs=0.05)
     entries = json.loads((root / "ghostpath.json").read_text())["episodes"]
     assert entries[0]["manual_finish"]
+
+
+@pytest.mark.parametrize("legacy_timing", [True, False])
+def test_saved_grip_edits_follow_the_path_timing_used_to_make_them(tmp_path, legacy_timing):
+    session = Session(tmp_path)
+    session.config = Configuration(cameras=[])
+    session._command(Command(action="connect"))
+    try:
+        start = session.pose
+        samples = [
+            Sample(i / 60, {**start, "elbow_flex": min(42, max(0, (i - 16) * 1.4))})
+            for i in range(121)
+        ]
+        session.teaching_origin = start
+        ident = session._save_raw(samples, complete=True)
+        base = session._compile_path(samples, start, exact_start=True, legacy_timing=legacy_timing)
+        knots = [(0, 0), (0.5, -4), (1, 0)]
+        edited = GrippedPath(base, knots, CONTROL)
+        if legacy_timing:
+            # Files from earlier versions only stored the fractional grip edit times.
+            saved = json.loads(session._path_file(ident).read_text())
+            write_json(session._path_file(ident), {**saved, "grip_edits": knots})
+        else:
+            session._set_path(base, ident)
+            session.grip_assist = SimpleNamespace(result=lambda _: edited)
+            session._finish_grip_assist()
+            ident = session.path_id
+        session._load_path(ident)
+        assert session.path.base.legacy_timing is legacy_timing
+        assert session.path.duration == pytest.approx(edited.duration)
+        for step in range(11):
+            t = edited.duration * step / 10
+            assert session.path.at(t) == pytest.approx(edited.at(t))
+    finally:
+        session._close_devices()
 
 
 def test_current_and_saved_poses_are_selectable_without_a_rest_pose(tmp_path):

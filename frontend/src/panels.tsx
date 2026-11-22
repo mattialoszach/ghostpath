@@ -274,8 +274,8 @@ export function Timeline({ state }: { state: State | null }) {
   return <section className="panel timeline-panel">
     <div className="panel-heading">
       <div className="heading-icon"><Activity size={16} /></div>
-      <div><h2>Trajectory</h2><p>{state?.phase === 'teaching' ? 'Sampling raw joint positions' : state?.path ? `${state.path.keyframes} keyframes · bounded replay` : 'Joint positions over time'}</p></div>
-      <span className="meta-pill push"><span className={chart ? 'warm' : ''}>{chart ? elapsed(duration) : 'No path taught'}</span></span>
+      <div><h2>Trajectory</h2><p>{state?.phase === 'teaching' ? 'Sampling raw joint positions' : state?.path ? `${elapsed(state.path.teaching_duration)} taught · ${state.path.keyframes} keyframes` : 'Joint positions over time'}</p></div>
+      <span className="meta-pill push"><span className={chart ? 'warm' : ''}>{chart ? `${elapsed(duration)} planned` : 'No path taught'}</span></span>
     </div>
     <div className="timeline-content">
       <div className="timeline-chart">

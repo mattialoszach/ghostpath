@@ -9,6 +9,7 @@ from ghostpath.robot import SimulatedFollower
 from ghostpath.session import CONTROL
 from ghostpath.trajectory import (
     JOINT_MARGIN,
+    REPLAY_RATE_DECEL,
     AlignedPath,
     NativePlayer,
     Player,
@@ -56,6 +57,53 @@ def test_smoothing_preserves_gripper_turns_and_bounds_derivatives():
     aligned = AlignedPath(measured, path, CONTROL)
     assert aligned.at(0) == measured
     assert aligned.at(aligned.prefix) == start
+
+
+@pytest.mark.parametrize("stroke_scale", [1, 4])
+def test_replay_uses_taught_cadence_when_limits_allow(stroke_scale):
+    robot = SimulatedFollower(CONTROL)
+    start = robot.read()
+    motion = Motion(start, robot.limits, CONTROL)
+
+    def move(t, begin, duration, angle):
+        fraction = min(1, max(0, (t - begin) / (duration * stroke_scale)))
+        return angle * (1 - math.cos(math.pi * fraction)) / 2
+
+    samples = [
+        Sample(
+            t,
+            {
+                **start,
+                "shoulder_lift": move(t, 1.0, 0.55, 36),
+                "elbow_flex": move(t, 1.2, 0.62, 25),
+                "wrist_flex": move(t, 1.1, 0.97, 13),
+            },
+        )
+        for t in (i / 60 for i in range(601))
+    ]
+    path = ReplayPath(samples, motion, CONTROL, speed=1)
+    assert path.teaching_duration == 10
+    if stroke_scale == 4:
+        assert path.duration == pytest.approx(10)
+    else:
+        legacy = ReplayPath(samples, motion, CONTROL, speed=1, legacy_timing=True)
+        assert path.duration > 10
+        assert path.duration + 1 < legacy.duration
+
+    # The arm can change playback rate in either travel direction and remain
+    # inside the acceleration limit even at the maximum rate change.
+    dt = path.duration / 5000
+    before, previous = path.start, dict.fromkeys(JOINTS, 0.0)
+    for i in range(1, 5001):
+        pose = path.at(i * dt)
+        for j in JOINTS[:-1]:
+            velocity = (pose[j] - before[j]) / dt
+            acceleration = abs(velocity - previous[j]) / dt
+            assert velocity >= -1e-8
+            assert velocity <= CONTROL.velocity(j)
+            assert acceleration + REPLAY_RATE_DECEL * velocity <= CONTROL.accel(j)
+            previous[j] = velocity
+        before = pose
 
 
 def test_rejects_discontinuous_raw_measurements():

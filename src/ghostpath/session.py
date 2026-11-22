@@ -796,7 +796,12 @@ class Session:
             origin = item["start_pose"]
             self.motion.check_pose(origin)
             samples = [Sample(**sample) for sample in item["samples"]]
-            base = self._compile_path(samples, origin, exact_start=item.get("exact_start") is True)
+            base = self._compile_path(
+                samples,
+                origin,
+                exact_start=item.get("exact_start") is True,
+                legacy_timing="grip_edits" in item and item.get("grip_timing", 1) == 1,
+            )
             path = (
                 GrippedPath(base, [tuple(point) for point in item["grip_edits"]], CONTROL)
                 if "grip_edits" in item
@@ -808,7 +813,12 @@ class Session:
             raise WorkflowError(f"Could not load path: {exc}") from exc
 
     def _compile_path(
-        self, samples: list[Sample], origin: Pose, *, exact_start: bool = False
+        self,
+        samples: list[Sample],
+        origin: Pose,
+        *,
+        exact_start: bool = False,
+        legacy_timing: bool = False,
     ) -> ReplayPath:
         if samples and not self._near(origin, samples[0].pose):
             raise ValueError("The path begins outside its saved start tolerance.")
@@ -819,6 +829,7 @@ class Session:
             self.config.speed,
             joint_margin=self._joint_margin(),
             start_pose=origin if exact_start else None,
+            legacy_timing=legacy_timing,
         )
         if not self._near(origin, path.start):
             raise ValueError("The path begins outside its saved start tolerance.")
@@ -855,6 +866,7 @@ class Session:
             ident = f"{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid4().hex[:8]}"
             source.update(
                 grip_edits=edited.knots,
+                grip_timing=1 if edited.base.legacy_timing else 2,
                 source_path=self.path_id,
                 created=datetime.now(UTC).isoformat(),
             )
@@ -1333,6 +1345,7 @@ class Session:
             "path": {
                 "id": self.path_id,
                 "duration": round(self.path.duration, 2),
+                "teaching_duration": round(self.path.teaching_duration, 2),
                 "keyframes": self.path.keyframes,
                 "chart": self.chart,
             }

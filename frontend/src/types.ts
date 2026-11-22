@@ -85,7 +85,7 @@ export interface State {
   fault: string
   notice: string
   operation: string | null
-  path: { id: string; duration: number; keyframes: number; chart: number[][] } | null
+  path: { id: string; duration: number; teaching_duration: number; keyframes: number; chart: number[][] } | null
   paths: { id: string; task: string; created: string; duration: number; grip_edited: boolean }[]
   dataset_path: string | null
   repo_id: string | null
