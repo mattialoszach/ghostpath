@@ -137,8 +137,16 @@ def load_camera_history(store, stamp, streams):
             [(-0.023, -0.029), (0.007, 0.007), (0.110, 0.115)],
             6.0,
         ),
+        (
+            {
+                "workspace": [-0.017, 0.016, 0.049, 0.082, 0.115],
+                "wrist": [-0.015, 0.018, 0.051, 0.084, 0.117],
+            },
+            [(-0.017, -0.015), (0.049, 0.051), (0.115, 0.117)],
+            2.0,
+        ),
     ],
-    ids=["joint-skew", "reserve-next-sample"],
+    ids=["joint-skew", "reserve-next-sample", "avoid-mixing-camera-intervals"],
 )
 def test_joint_pairing_saves_episode_with_distinct_frames(physical_writer, streams, expected, skew):
     module = pytest.importorskip("lerobot.datasets.lerobot_dataset")

@@ -97,30 +97,30 @@ def _match_frames(
     if not groups or not all(groups):
         return None
 
-    def closest(frames: list[CameraFrame]) -> CameraFrame:
-        return min(frames, key=lambda frame: (abs(frame.timestamp - stamp), frame.sequence))
-
-    nearest = [closest(frames) for frames in groups]
-    times = [frame.timestamp for frame in nearest]
-    if max(times) <= min(times) + tolerance:
-        return nearest
-
-    # A feasible set lies in a window starting at one of the candidate times.
-    # Within each window, the closest frame from each camera minimizes the offset.
-    starts = sorted({frame.timestamp for frames in groups for frame in frames})
+    # Find the tightest window containing the robot sample and a frame from each camera.
+    # Picking each camera's nearest frame independently can straddle the sample by a frame period.
+    starts = {frame.timestamp for frames in groups for frame in frames if frame.timestamp < stamp}
+    starts.add(stamp)
     best = None
-    best_score = (float("inf"), float("inf"), float("inf"))
-    for start in starts:
-        window = [
-            [frame for frame in frames if start <= frame.timestamp <= start + tolerance]
-            for frames in groups
-        ]
+    best_score = (float("inf"),) * 4
+    for start in sorted(starts):
+        window = [[frame for frame in frames if frame.timestamp >= start] for frames in groups]
         if not all(window):
             continue
-        match = [closest(frames) for frames in window]
+        end = max(stamp, *(min(frame.timestamp for frame in frames) for frames in window))
+        if end > start + tolerance:
+            continue
+        match = [
+            min(
+                (frame for frame in frames if frame.timestamp <= end),
+                key=lambda frame: (abs(frame.timestamp - stamp), frame.sequence),
+            )
+            for frames in window
+        ]
         offsets = [abs(frame.timestamp - stamp) for frame in match]
         times = [frame.timestamp for frame in match]
-        score = (max(offsets), sum(offsets), max(times) - min(times))
+        span = max(stamp, *times) - min(stamp, *times)
+        score = (span, max(offsets), sum(offsets), max(times) - min(times))
         if score < best_score:
             best, best_score = match, score
     return best
@@ -406,13 +406,10 @@ class Cameras:
                 for spec in self.recorded
             ]
 
-        groups = collect(timestamp, timestamp)
+        groups = collect(timestamp, timestamp + tolerance)
         if reserved:
             groups = _merge_candidates(groups, [[frame] for frame in reserved])
         match = _match_frames(groups, timestamp, tolerance)
-        if match is None:
-            groups = _merge_candidates(groups, collect(timestamp, timestamp + tolerance))
-            match = _match_frames(groups, timestamp, tolerance)
         if match is None:
             self._raise_sync_error(groups, timestamp, tolerance)
         if next_timestamp is None:
