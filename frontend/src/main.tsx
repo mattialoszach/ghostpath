@@ -2,17 +2,17 @@ import '@fontsource-variable/inter/wght.css'
 import '@fontsource/ibm-plex-mono/latin-400.css'
 import {
   ArrowDownToLine, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardCheck, Crosshair,
-  Database, Hand, Play, Radio, RotateCcw, Save, Square, TriangleAlert, X, Zap, ZapOff,
+  Camera, Database, Hand, Play, Radio, RotateCcw, Save, Square, TriangleAlert, X, Zap, ZapOff,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { GripPanel } from './grip'
 import {
-  CameraPanel, KeyboardLegend, ManualControls, ReviewControls, SavedPaths, SetupPanel, Telemetry, Timeline,
+  CameraPanel, KeyboardLegend, ManualControls, ReviewMetrics, SavedPaths, SetupPanel, Telemetry, Timeline,
   VirtualJoints,
 } from './panels'
 import { useWorkspace } from './socket'
-import { defaults, elapsed, jointLabels, replayProfileLabels } from './types'
+import { defaults, elapsed, humanize, jointLabels, replayProfileLabels } from './types'
 import type { Config, Phase, Send, State } from './types'
 import './styles.css'
 
@@ -64,7 +64,7 @@ function Header({ state, online, available, send }: { state: State | null; onlin
               <button type="button" disabled={!available || !canFinish || Boolean(state?.operation)} onClick={() => send('finish')}><Database size={14} /> Finish dataset</button>
               <button type="button" disabled={!available || !canDisconnect || Boolean(state?.operation)} onClick={() => send('disconnect')}><Radio size={14} /> Disconnect</button>
             </>}
-            <a href="https://huggingface.co/docs/lerobot/v0.7.0/so101" target="_blank" rel="noreferrer"><CircleHelp size={14} /> SO-101 setup guide</a>
+            <a href="https://huggingface.co/docs/lerobot/so101" target="_blank" rel="noreferrer"><CircleHelp size={14} /> SO-101 setup guide</a>
           </div>
         </details>
       </div>
@@ -77,12 +77,13 @@ function EpisodeHeader({ state, config }: { state: State; config: Config }) {
   const saved = state.phase === 'next' && !!state.quality
   const complete = state.phase === 'finished'
   const preparing = state.phase === 'next' && !saved
+  const reviewing = state.phase === 'review'
   return <>
     <div className="episode-heading">
       <div className="dataset-name"><Database size={14} /><span>Dataset</span><strong>{config.dataset}</strong></div>
       <div className="episode-title">
         <h1>{complete ? 'Dataset complete' : `Episode ${saved ? state.accepted : state.episode}`}</h1>
-        {!complete && <span className={`episode-status ${state.recording ? 'taking' : saved ? 'saved' : ''}`}>{state.recording ? 'Recording' : saved ? 'Saved' : preparing ? 'Up next' : 'Draft'}</span>}
+        {!complete && <span className={`episode-status ${state.recording ? 'taking' : saved ? 'saved' : ''}`}>{state.recording ? 'Recording' : saved ? 'Saved' : reviewing ? state.stopped_early ? 'Partial take' : 'In review' : preparing ? 'Up next' : 'Draft'}</span>}
         <span className="saved-count">{state.accepted} saved</span>
       </div>
       <p>{config.task}</p>
@@ -107,9 +108,26 @@ function Confirmation({ value, close }: { value: Confirm; close: () => void }) {
   </dialog>
 }
 
-function Workflow({ state, config, send, available, reviewIndex, setReviewIndex }: {
-  state: State | null; config: Config; send: Send; available: boolean;
-  reviewIndex: number; setReviewIndex: (index: number) => void
+function DatasetOutput({ path }: { path: string }) {
+  const [feedback, setFeedback] = useState('')
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(path)
+      setFeedback('Dataset path copied.')
+    } catch {
+      setFeedback('Could not copy automatically. Select the path to copy it.')
+    }
+  }
+  return <div>
+    <div className="export-path"><ArrowDownToLine size={15} /><code>{path}</code>
+      <button className="button" onClick={copy}>Copy path</button>
+    </div>
+    {feedback && <p className="hint" role="status">{feedback}</p>}
+  </div>
+}
+
+function Workflow({ state, config, send, available }: {
+  state: State | null; config: Config; send: Send; available: boolean
 }) {
   const [confirm, setConfirm] = useState<Confirm | null>(null)
   const [manualFinish, setManualFinish] = useState(config.mode === 'hybrid')
@@ -121,16 +139,22 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
   const simulated = config.device === 'simulation'
   const atStart = state?.at_start
   const hasStart = Boolean(state?.start_pose)
-  const canReturn = available && (simulated || state?.torque === 'on')
+  const motionPowered = simulated || state?.torque === 'on'
+  const canReturn = available && motionPowered
   const canManagePower = Boolean(state?.connected && !state.fault && ['ready', 'teach_paused', 'reset', 'review', 'next', 'finished'].includes(phase))
   const canDiscard = phase === 'teaching' || phase === 'teach_paused' ||
     Boolean(state?.path && ['reset', 'reset_released', 'returning'].includes(phase))
-  const discardEpisode = (action: 'discard_episode' | 'discard' = 'discard_episode') => setConfirm({
-    title: 'Discard this episode?',
-    text: 'This ends the current attempt. Saved episodes and reusable paths stay in the library.',
-    label: 'Discard episode',
-    submit: () => send(action, { confirmed: true }),
-  })
+  const discardEpisode = (action: 'discard_episode' | 'discard' | 'retry' = 'discard_episode') => {
+    const label = action === 'retry' ? 'Discard & retry' : action === 'discard' ? 'Discard take' : 'Discard episode'
+    setConfirm({
+      title: `${label}?`,
+      text: action === 'retry'
+        ? 'This take will be deleted. You can reset the scene and record the same path again.'
+        : 'This ends the current attempt. Saved episodes and reusable paths stay in the library.',
+      label,
+      submit: () => send(action, { confirmed: true }),
+    })
+  }
   const instruct = (action: string, title: string, text: string, label: string, extra = {}) => {
     const submit = () => send(action, { confirmed: true, ...extra })
     if (simulated) submit()
@@ -154,7 +178,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
     'Confirm return',
     { allow_auto_reset_once: !config.automatic_reset },
   )
-  const returnButton = <button className={`button ${simulated || config.automatic_reset ? 'primary' : ''}`}
+  const returnButton = (primary: boolean) => <button className={`button ${primary ? 'primary' : ''}`}
     disabled={!canReturn} onClick={autoReset}><RotateCcw size={15} /> Return to start</button>
   const torqueOn = state?.torque === 'on'
   const changePower = () => torqueOn
@@ -181,14 +205,14 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       const savedPoses = state?.start_poses ?? []
       title = !hasStart ? 'Choose a start pose' : atStart ? 'Ready to teach' : 'Move to the selected start'
       detail = !hasStart
-        ? 'Position the arm by hand and use its current position, or select a saved pose.'
-        : atStart ? 'Start teaching from the selected pose. Reset will return the arm here.'
-        : canReturn ? 'Return to start to get ready to teach.'
+        ? simulated ? 'Use the current position to set a start pose for the example.' : 'Position the arm by hand and use its current position, or select a saved pose.'
+        : atStart ? simulated ? 'Try the example path, or teach your own with the virtual joint controls.' : 'Start teaching from the selected pose. Reset will return the arm here.'
+        : motionPowered ? 'Return to start to get ready to teach.'
         : 'Position the arm by hand, or turn torque on for an automatic return.'
       extra = <>
         {state?.notice.startsWith('Episode discarded.') && <p className="hint" role="status">{state.notice}</p>}
         <div className="start-picker">
-          <button className="button" disabled={!available} onClick={() => send('capture_start')}><Crosshair size={15} /> Use current position</button>
+          <button className={`button ${hasStart ? '' : 'primary'}`} disabled={!available} onClick={() => send('capture_start')}><Crosshair size={15} /> Use current position</button>
           <label className="field">Saved start poses
             <select value={state?.start_pose_id ?? ''} disabled={!available || !savedPoses.length}
               onChange={event => { if (event.target.value) send('select_start', { pose_id: event.target.value }) }}>
@@ -201,9 +225,9 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
         {state && state.paths.length > 0 && <details className="virtual"><summary>Load a taught path</summary><SavedPaths state={state} send={send} available={available} /></details>}
       </>
       controls = <>
-        {hasStart && !atStart && returnButton}
-        {simulated && hasStart && atStart && <button className="button" disabled={!available} onClick={() => send('demo_path')}><Play size={15} /> Example path</button>}
-        <button className="button primary" disabled={!available || !hasStart || !atStart} onClick={teaching}><Hand size={15} /> Start teaching</button>
+        {hasStart && !atStart && returnButton(motionPowered)}
+        {hasStart && atStart && <button className={`button ${simulated ? '' : 'primary'}`} disabled={!available} onClick={teaching}><Hand size={15} /> Start teaching</button>}
+        {simulated && atStart && <button className="button primary" disabled={!available} onClick={() => send('demo_path')}><Play size={15} /> Example path</button>}
       </>
       break
     }
@@ -223,23 +247,31 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
     case 'reset': {
       const paused = phase === 'teach_paused'
       const hasPath = Boolean(state?.path)
-      title = paused ? 'Teaching paused' : atStart ? 'Ready to replay' : 'Reset the arm and scene'
-      detail = paused
-        ? hasPath ? 'Keep teaching from this endpoint, or use Boomerang to reverse the task back to the start.' : state?.notice || 'Continue teaching to create a playable path.'
-        : state?.scene_reversed && atStart ? state.notice
-        : atStart ? 'Verify the scene and clear the camera views before recording.'
-        : 'Use Boomerang from the taught endpoint, or return to start and reset the scene by hand.'
+      const canBoomerang = !state?.scene_reversed && (state?.at_path_end || atStart)
+      const waitingCameras = config.cameras.filter(spec => {
+        const status = state?.cameras[spec.name]
+        return spec.record && (!status?.ready || !status.fps)
+      })
+      const camerasReady = waitingCameras.length === 0
+      title = paused ? 'Teaching paused' : !atStart ? 'Reset the arm and scene'
+        : !motionPowered ? 'Hold the arm before replay' : !camerasReady ? 'Waiting for cameras' : 'Ready to replay'
+      detail = !hasPath ? state?.notice || 'Continue teaching to create a playable path.'
+        : !motionPowered ? 'Turn on torque before a powered move or reset the arm by hand.'
+        : atStart ? state?.scene_reversed ? state.notice : 'Verify the scene and clear the camera views before recording.'
+        : canBoomerang ? 'Use Boomerang for a reversible task, or reset the arm and objects by hand.'
+        : 'Return to start and restore the objects before recording.'
       controls = <>
         {paused && <button className="button" disabled={!available || !state?.can_continue} onClick={continueTeaching}><Hand size={15} /> Continue teaching</button>}
-        {hasPath && (!atStart || !canReturn) && <>
+        {hasPath && (!atStart || !motionPowered) && <>
           <button className="button" disabled={!available} onClick={release}><Hand size={15} /> Manual reset</button>
-          {!atStart && returnButton}
+          {!atStart && returnButton(motionPowered && !canBoomerang)}
         </>}
-        {hasPath && !state?.scene_reversed && <button className={`button ${paused && !atStart ? 'primary' : ''}`}
-          disabled={!canReturn || !(state?.at_path_end || state?.at_start)} onClick={reverseReset}><RotateCcw size={15} /> Boomerang scene reset</button>}
-        {hasPath && <button className={`button ${atStart ? 'primary' : ''}`} disabled={!canReturn || !atStart} onClick={startReplay}><Play size={15} fill="currentColor" /> Replay & record</button>}
+        {hasPath && canBoomerang && <button className={`button ${motionPowered && !atStart ? 'primary' : ''}`}
+          disabled={!canReturn} onClick={reverseReset}><RotateCcw size={15} /> Boomerang scene reset</button>}
+        {hasPath && atStart && <button className="button primary" disabled={!canReturn || !camerasReady} onClick={startReplay}><Play size={15} fill="currentColor" /> Replay & record</button>}
       </>
       extra = <>
+        {hasPath && atStart && !camerasReady && <p className="capture-wait" role="status"><Camera size={15} /> Waiting for recording cameras: {waitingCameras.map(spec => humanize(spec.name)).join(', ')}. Check the camera monitor below.</p>}
         {paused && !state?.can_continue && <p className="hint">Continuing requires the arm at the paused endpoint and teaching time remaining.</p>}
         {state?.path && state.path.replay_profile !== state.config.replay_profile &&
           <p className="hint">This path uses the {replayProfileLabels[state.path.replay_profile].toLowerCase()} saved with its grip edits.</p>}
@@ -302,38 +334,37 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       detail = state?.notice || 'Please wait for the dataset operation to complete.'
       extra = <div className="processing-bar"><i /></div>
       break
-    case 'review':
+    case 'review': {
+      const hasViews = Boolean(state?.quality?.review_frames)
       title = 'Review this take'
       detail = state?.fault ? 'The arm stopped after recording. You can still review and save this take.'
         : state?.stopped_early ? 'Recording stopped early. Review the captured portion before saving.'
-        : 'Check that the grasp held and the workspace stayed clear before saving.'
+        : hasViews ? 'Check the recorded views below before saving this take.' : 'This take contains joint data only. Check the capture and tracking details before saving.'
       controls = <>
-        <button className="button quiet-danger" disabled={!available} onClick={() => discardEpisode('discard')}><X size={15} /> Discard episode</button>
-        <button className="button" disabled={!available || Boolean(state?.fault)} onClick={() => send('retry')}><RotateCcw size={15} /> Retry</button>
+        <button className="button quiet-danger" disabled={!available} onClick={() => discardEpisode('discard')}><X size={15} /> Discard take</button>
+        <button className="button" disabled={!available || Boolean(state?.fault)} onClick={() => discardEpisode('retry')}><RotateCcw size={15} /> Retry this path</button>
         <button className="button primary" disabled={!available} onClick={() => send('save')}><Save size={15} /> Save episode</button>
       </>
       extra = state && <>
         {state.fault && <p className="hint" role="alert">{state.fault}</p>}
-        <ReviewControls state={state} reviewIndex={reviewIndex} change={setReviewIndex} />
+        <ReviewMetrics state={state} />
       </>
       break
+    }
     case 'next':
       title = state?.quality ? 'Episode saved' : 'Take discarded'
-      detail = `${state?.accepted ?? 0} accepted. Start another episode or finalize the dataset.`
+      detail = state?.accepted ? 'Collect another take or finish the dataset on this computer.' : 'Nothing has been saved yet. Reuse this path or teach a new one.'
       controls = <>
-        <button className="button primary" disabled={!available} onClick={() => send('next')}><ArrowRight size={15} /> Next episode</button>
-      </>
-      extra = <>
-        {config.mode !== 'repeat' && state?.path && <button className="text-button" disabled={!available} onClick={() => send('next', { reuse: true })}><RotateCcw size={13} /> Reuse this path</button>}
-        {config.mode === 'repeat' && <button className="text-button" disabled={!available} onClick={() => send('next', { reuse: false })}><Hand size={13} /> Teach a new path</button>}
+        {Boolean(state?.accepted) && <button className="button" disabled={!available} onClick={() => send('finish')}><Database size={15} /> Finish dataset</button>}
+        {state?.path && <button className={`button ${config.mode === 'repeat' ? 'primary' : ''}`} disabled={!available} onClick={() => send('next', { reuse: true })}><RotateCcw size={15} /> Reuse this path</button>}
+        <button className={`button ${config.mode !== 'repeat' || !state?.path ? 'primary' : ''}`} disabled={!available} onClick={() => send('next', { reuse: false })}><Hand size={15} /> Teach a new path</button>
       </>
       break
     case 'finished':
       title = 'Dataset ready'
       detail = `${state?.accepted ?? 0} saved episodes · LeRobotDataset v3.0`
       controls = <button className="button primary" disabled={!available} onClick={() => send('disconnect')}><ArrowRight size={15} /> New session</button>
-      extra = <div className="export-path"><ArrowDownToLine size={15} /><code>{state?.dataset_path}</code>
-        <button className="button" onClick={async e => { const button = e.currentTarget; try { await navigator.clipboard.writeText(state?.dataset_path || ''); button.textContent = 'Copied' } catch { button.textContent = 'Select path to copy' } }}>Copy</button></div>
+      extra = state?.dataset_path && <DatasetOutput path={state.dataset_path} />
       break
     case 'fault':
       title = 'Workspace stopped'
@@ -383,16 +414,16 @@ function App() {
   return <div className="shell">
     <Header state={state} online={online} available={available} send={send} />
     <main className={`main ${phase === 'setup' ? 'setup-main' : ''}`}>
-      {phase === 'setup' ? <h1 className="setup-title">Set up collection</h1> : state && <EpisodeHeader state={state} config={activeConfig} />}
+      {phase === 'setup' ? <div className="setup-intro"><h1 className="setup-title">Set up collection</h1><p>Try the full workflow in the simulator, or connect a calibrated SO-101 follower.</p></div> : state && <EpisodeHeader state={state} config={activeConfig} />}
       {error && <div className="alert" role="alert"><TriangleAlert size={17} /><span>{error}</span><button className="icon-button bare push" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
       {phase === 'setup' ? <SetupPanel config={setupConfig} change={next => {
         if (next.dataset !== setupConfig.dataset) setDatasetEdited(true)
         setConfig(next)
       }} available={available} connect={() => send('connect', { config: setupConfig })} /> :
         <div className="main-stack">
-          <Workflow state={state} config={activeConfig} send={send} available={available} reviewIndex={takeFrame} setReviewIndex={setTakeFrame} />
+          <Workflow state={state} config={activeConfig} send={send} available={available} />
           {phase !== 'finished' && <>
-            {!!activeConfig.cameras.length && <CameraPanel config={activeConfig} state={state} online={online} reviewIndex={takeFrame} />}
+            <CameraPanel config={activeConfig} state={state} online={online} reviewIndex={takeFrame} setReviewIndex={setTakeFrame} />
             <details className="diagnostics">
               <summary><ChevronDown size={14} /> Diagnostics</summary>
               <div className="diagnostics-content"><Telemetry state={state} /><Timeline state={state} /></div>

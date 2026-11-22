@@ -26,22 +26,25 @@ export function SetupPanel({ config, change, connect, available }: {
 }) {
   const [devices, setDevices] = useState<Devices>({ ports: [], calibrations: [] })
   const [scan, setScan] = useState('')
+  const [scanning, setScanning] = useState(false)
   const [expanded, setExpanded] = useState<number | null>(null)
   const set = <K extends keyof Config>(key: K, value: Config[K]) => change({ ...config, [key]: value })
   const updateCamera = (index: number, patch: Partial<CameraSpec>) => {
     set('cameras', config.cameras.map((item, i) => i === index ? { ...item, ...patch } : item))
   }
   const scanPorts = async () => {
-    setScan('Scanning…')
+    setScanning(true)
+    setScan('')
     try {
       const response = await fetch('/api/devices')
       if (!response.ok) throw Error()
       const result: Devices = await response.json()
       setDevices(result)
-      setScan(result.ports.length ? '' : 'No USB serial device found.')
-      if (result.ports.length === 1) set('port', result.ports[0].port)
+      setScan(result.ports.length ? 'Select the port for your follower.' : 'No USB serial device found.')
     } catch {
       setScan('Device scan unavailable.')
+    } finally {
+      setScanning(false)
     }
   }
 
@@ -71,10 +74,10 @@ export function SetupPanel({ config, change, connect, available }: {
                   {config.port && !devices.ports.some(p => p.port === config.port) && <option value={config.port}>{config.port}</option>}
                   {devices.ports.map(p => <option key={p.port} value={p.port}>{p.port}</option>)}
                 </select>
-                <button type="button" className="button icon-button" onClick={scanPorts} aria-label="Scan serial ports" title="Scan serial ports"><ScanLine size={16} /></button>
+                <button type="button" className="button" disabled={!available || scanning} onClick={scanPorts}><ScanLine size={16} /> Scan ports</button>
               </div>
             </div>
-            {scan && <p className="hint" role="status">{scan}</p>}
+            {(scanning || scan) && <p className="hint" role="status">{scanning ? 'Scanning…' : scan}</p>}
             <label className="field">LeRobot calibration ID
               <input value={config.robot_id} onChange={e => set('robot_id', e.target.value)} list="calibrations" required />
               <datalist id="calibrations">{devices.calibrations.map(id => <option key={id} value={id} />)}</datalist>
@@ -222,27 +225,27 @@ function useCameraFrame(name: string, active: boolean, live: boolean, review?: n
   return frame
 }
 
-function CameraTile({ spec, state, demo, online, review }: {
+function CameraTile({ spec, state, demo, online, review, datasetFps }: {
   spec: CameraSpec
   state: State | null
   demo: boolean
   online: boolean
   review?: number
+  datasetFps: number
 }) {
   const status = state?.cameras[spec.name]
-  const savedPreview = review !== undefined && spec.record
-  const isLive = Boolean(online && state?.connected && review === undefined)
-  const visible = isLive || savedPreview || demo && review === undefined
-  const frame = useCameraFrame(spec.name, visible && online, isLive, savedPreview ? review : undefined)
+  const savedPreview = review !== undefined
+  const isLive = Boolean(online && state?.connected && !savedPreview)
+  const frame = useCameraFrame(spec.name, online && (isLive || savedPreview), isLive, review)
   const ready = isLive && status?.ready
   const image = isLive && !ready ? undefined : frame
-  const badge = savedPreview ? 'TAKE' : review !== undefined ? 'PREVIEW ONLY' : demo ? 'SIM' :
+  const badge = savedPreview ? 'TAKE' : demo && isLive ? 'SIM' :
     ready ? 'LIVE' : isLive && status?.retrying ? 'RECONNECTING' :
     isLive && !status?.problem ? 'CONNECTING' : 'OFFLINE'
   return <figure className="camera-tile">
     <div className="feed">
       {image ? <img src={image} draggable="false" alt={`${humanize(spec.name)} ${savedPreview ? 'recorded' : demo ? 'simulated' : 'live'} view`} /> :
-        <div className="empty-camera"><Camera size={24} /><span>{review !== undefined ? 'Preview only' : status?.problem || (isLive ? 'Waiting for frames' : 'Connect camera')}</span></div>}
+        <div className="empty-camera"><Camera size={24} /><span>{savedPreview ? online ? 'Waiting for preview' : 'Workspace offline' : status?.problem || (isLive ? 'Waiting for frames' : 'Connect camera')}</span></div>}
       <div className="feed-top">
         <span className="feed-id"><Video size={13} /> {humanize(spec.name)}</span>
         <span className={`feed-label ${savedPreview ? 'captured' : ready ? 'active' : ''}`}><i />{badge}</span>
@@ -250,22 +253,31 @@ function CameraTile({ spec, state, demo, online, review }: {
       {image && <div className="viewfinder"><i /><i /><i /><i /></div>}
     </div>
     <figcaption>
-      <span>{spec.width} × {spec.height} <b>·</b> {status?.fps || spec.capture_fps} FPS</span>
-      <span className={spec.record ? 'record-source' : ''}>{spec.record ? <><span className="tiny-dot" /> Record</> : <><Eye size={12} /> Preview only</>}</span>
+      <span>{spec.width} × {spec.height} <b>·</b> {savedPreview ? datasetFps : status?.fps || spec.capture_fps} FPS</span>
+      <span className={spec.record ? 'record-source' : ''}>{spec.record ? <><span className="tiny-dot" /> {savedPreview ? 'Recorded' : 'Record'}</> : <><Eye size={12} /> Preview only</>}</span>
     </figcaption>
   </figure>
 }
 
-export function CameraPanel({ config, state, online, reviewIndex }: {
-  config: Config, state: State | null, online: boolean, reviewIndex: number
+export function CameraPanel({ config, state, online, reviewIndex, setReviewIndex }: {
+  config: Config, state: State | null, online: boolean, reviewIndex: number, setReviewIndex: (index: number) => void
 }) {
-  const review = state?.phase === 'review' ? reviewIndex : undefined
-  return <section className="panel camera-panel" aria-label="Camera monitor">
+  const reviewing = state?.phase === 'review'
+  const reviewFrames = state?.quality?.review_frames ?? 0
+  const specs = reviewing ? config.cameras.filter(spec => spec.record) : config.cameras
+  if (reviewing && !reviewFrames) return null
+  const title = reviewing ? 'Recorded views' : 'Cameras'
+  return <section className="panel camera-panel" aria-label={title}>
     <div className="panel-heading">
-      <h2>{review === undefined ? 'Cameras' : 'Recorded views'}</h2>
+      <h2>{title}</h2>
     </div>
-    {config.cameras.length ? <div className="camera-grid">
-      {config.cameras.map(spec => <CameraTile key={spec.name} spec={spec} state={state} demo={config.device === 'simulation'} online={online} review={review} />)}
+    {reviewing && reviewFrames > 1 && <label className="scrub">
+      <span className="scrub-label"><Film size={15} /> Preview frame</span>
+      <input aria-label="Review preview frames" aria-valuetext={`${reviewIndex + 1} of ${reviewFrames}`} type="range" value={reviewIndex} min={0} max={reviewFrames - 1} onChange={event => setReviewIndex(Number(event.target.value))} />
+      <span>{reviewIndex + 1} / {reviewFrames}</span>
+    </label>}
+    {specs.length ? <div className="camera-grid">
+      {specs.map(spec => <CameraTile key={spec.name} spec={spec} state={state} demo={config.device === 'simulation'} online={online} review={reviewing ? reviewIndex : undefined} datasetFps={config.fps} />)}
     </div> : <div className="empty-collection"><EyeOff size={27} /><p>No cameras selected</p><span>Episodes will capture joint telemetry.</span></div>}
   </section>
 }
@@ -304,9 +316,7 @@ export function Timeline({ state }: { state: State | null }) {
   </section>
 }
 
-export function ReviewControls({ state, reviewIndex, change }: {
-  state: State, reviewIndex: number, change: (index: number) => void
-}) {
+export function ReviewMetrics({ state }: { state: State }) {
   const quality = state.quality
   if (!quality) return null
   const cameraCount = state.config.cameras.filter(camera => camera.record).length
@@ -315,18 +325,18 @@ export function ReviewControls({ state, reviewIndex, change }: {
     <div className="quality-grid">
       <div><span>Frames at {state.config.fps} FPS</span><strong>{quality.frames}</strong></div>
       <div><span>Dataset duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
-      {state.path && <>
-        <div><span>Teaching time</span><strong>{state.path.teaching_duration.toFixed(2)} s</strong></div>
-        <div><span>Planned path time</span><strong>{state.path.duration.toFixed(2)} s</strong></div>
-      </>}
-      {quality.max_arm_path_error_deg != null && <div><span>Peak arm path error</span><strong>{quality.max_arm_path_error_deg}°</strong></div>}
-      {quality.max_gripper_path_error_pct != null && <div><span>Peak gripper path error</span><strong>{quality.max_gripper_path_error_pct}%</strong></div>}
-      {cameraCount > 0 && quality.skipped_camera_samples != null && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
     </div>
     <details className="episode-options">
       <summary><ChevronDown size={14} /> Capture and tracking details</summary>
       <div>
         <div className="quality-grid">
+          {state.path && <>
+            <div><span>Teaching time</span><strong>{state.path.teaching_duration.toFixed(2)} s</strong></div>
+            <div><span>Planned path time</span><strong>{state.path.duration.toFixed(2)} s</strong></div>
+          </>}
+          {quality.max_arm_path_error_deg != null && <div><span>Peak arm path error</span><strong>{quality.max_arm_path_error_deg}°</strong></div>}
+          {quality.max_gripper_path_error_pct != null && <div><span>Peak gripper path error</span><strong>{quality.max_gripper_path_error_pct}%</strong></div>}
+          {cameraCount > 0 && quality.skipped_camera_samples != null && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
           {quality.capture_span_seconds != null && <div><span>First to last saved frame</span><strong>{quality.capture_span_seconds.toFixed(2)} s</strong></div>}
           {timing && <>
             <div><span>Alignment</span><strong>{timing.alignment_seconds.toFixed(2)} s</strong></div>
@@ -343,7 +353,6 @@ export function ReviewControls({ state, reviewIndex, change }: {
         {quality.max_arm_path_error_deg != null && <p className="hint">Path error compares encoder readings with the replay reference at the same sample time. Servo commands can aim ahead of that reference.</p>}
       </div>
     </details>
-    {quality.review_frames > 1 && <label className="scrub"><Film size={15} /><input aria-label="Review captured frames" type="range" value={reviewIndex} min={0} max={quality.review_frames - 1} onChange={e => change(Number(e.target.value))} /><span>{reviewIndex + 1}/{quality.review_frames}</span></label>}
   </div>
 }
 

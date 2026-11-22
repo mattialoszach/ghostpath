@@ -72,7 +72,9 @@ svg { flex-shrink: 0; vertical-align: middle; }
 .session-menu-content > :not(:disabled):hover { background: #302c33; }
 .main { min-width: 0; width: 100%; max-width: 1220px; margin-inline: auto; padding: 32px clamp(14px, 4vw, 40px) 30px; }
 .setup-main { max-width: 840px; }
-.setup-title { margin-bottom: 17px; font-size: clamp(28px, 5vw, 40px); letter-spacing: -.045em; }
+.setup-intro { margin-bottom: 17px; }
+.setup-title { font-size: clamp(28px, 5vw, 40px); letter-spacing: -.045em; }
+.setup-intro p { margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .episode-heading { margin-bottom: 19px; }
 .dataset-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; color: var(--muted); font-size: 12px; }
 .dataset-name svg { color: var(--accent); }
@@ -209,6 +211,8 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .workflow-card { padding: clamp(14px, 2.6vw, 24px); }
 .workflow-copy h2 { font-size: 19px; font-weight: 650; line-height: 1.25; letter-spacing: -.025em; }
 .workflow-content { display: grid; gap: 12px; margin-top: 14px; }
+.capture-wait { display: flex; align-items: flex-start; gap: 7px; color: #ffbc94; font-size: 12px; line-height: 1.4; }
+.capture-wait svg { flex: none; }
 .workflow-secondary { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-top: 13px; border-top: 1px solid var(--line); padding-top: 8px; }
 .workflow-secondary .text-button { min-height: 28px; }
 .discard-draft { margin-left: auto; color: #dda4a2; }
@@ -324,11 +328,15 @@ button.jog-shortcut.held { background: var(--accent); color: #241712; border-col
 kbd { color: #d1bec5; border: 1px solid #55434c; background: #292329; padding: 1px 4px; border-radius: 4px; font: 9px var(--mono); white-space: nowrap; }
 .virtual-grid input { min-width: 0; margin: 0; width: 53%; }
 .virtual summary { cursor: pointer; color: #c2b7be; font-size: 11px; }
-.virtual-grid, .scrub { margin-top: 6px; }
+.virtual-grid { margin-top: 6px; }
 .scrub, .export-path { display: flex; align-items: center; gap: 7px; color: #d1c0c6; font: 10px var(--mono); }
+.scrub { padding: 8px 13px; border-bottom: 1px solid var(--line); }
+.scrub-label { display: inline-flex; align-items: center; gap: 6px; }
 .scrub input { flex: 1; min-width: 0; }
+.scrub > span:last-child { min-width: 8ch; text-align: right; white-space: nowrap; }
 .export-path { background: #242126; padding: 6px; border-radius: 7px; }
 .export-path code { flex-grow: 1; overflow-wrap: anywhere; min-width: 0; }
+.export-path + .hint { margin-top: 6px; }
 @media (max-width: 680px) {
   .main { padding-top: 22px; }
   .topbar-inner { min-height: 52px; gap: 7px; }
