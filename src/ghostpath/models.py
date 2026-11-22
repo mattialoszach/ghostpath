@@ -33,6 +33,11 @@ class Mode(StrEnum):
     HYBRID = "hybrid"
 
 
+class ReplayProfile(StrEnum):
+    STANDARD = "standard"
+    FAST = "fast"
+
+
 class CameraSpec(StrictModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,23}$")
     source: int | str
@@ -51,6 +56,7 @@ class Configuration(StrictModel):
     dataset: str = Field(default="block-placement", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     fps: int = Field(default=30, ge=10, le=30)
     speed: float = Field(default=1.0, ge=0.25, le=2)
+    replay_profile: ReplayProfile = ReplayProfile.STANDARD
     mode: Mode = Mode.TEACH
     automatic_reset: bool = False
     cameras: list[CameraSpec] = Field(

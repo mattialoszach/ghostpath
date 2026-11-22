@@ -9,11 +9,11 @@ from fastapi.testclient import TestClient
 from ghostpath.api import create_app
 from ghostpath.cameras import CameraNotReady, Cameras
 from ghostpath.grip import CarryGripPath, GrippedPath
-from ghostpath.models import Command, Configuration, Phase
+from ghostpath.models import Command, Configuration, Phase, ReplayProfile
 from ghostpath.motion import JOINTS, Motion
 from ghostpath.poses import write_json
 from ghostpath.robot import SimulatedFollower
-from ghostpath.session import CONTROL, Session, WorkflowError
+from ghostpath.session import CONTROL, FAST_REPLAY, Session, WorkflowError
 from ghostpath.torque import TorqueManager
 from ghostpath.trajectory import ReversePath, Sample, Teaching
 
@@ -310,18 +310,26 @@ def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
     app = create_app(tmp_path)
     with TestClient(app, base_url="http://localhost") as client:
         with client.websocket_connect("ws://localhost/ws") as ws:
-            ws.send_json({"action": "connect", "config": {"cameras": [], "fps": 20}})
+            ws.send_json(
+                {
+                    "action": "connect",
+                    "config": {"cameras": [], "fps": 20, "replay_profile": "fast"},
+                }
+            )
             wait_for(ws, lambda s: s["phase"] == "ready")
             ws.send_json({"action": "load_path", "path_id": save_id})
             ready = wait_for(ws, lambda s: s["phase"] == "reset" and s["at_start"])
             assert ready["path"]["teaching_duration"] == 0.65
+            assert ready["path"]["replay_profile"] == "fast"
             ws.send_json({"action": "replay", "manual_finish": True})
             aligning = wait_for(ws, lambda s: s["replay_stage"] == "aligning" and s["frames"] > 0)
             assert aligning["recording"]
             assert aligning["progress"] == 0
+            assert app.state.session.robot.settings == FAST_REPLAY
             handoff = wait_for(ws, lambda s: s["phase"] == "manual")
             assert handoff["recording"]
             assert handoff["progress"] == pytest.approx(1)
+            assert app.state.session.robot.settings == CONTROL
             ws.send_json({"action": "jog", "axes": {"gripper": -1}})
             wait_for(ws, lambda s: s["phase"] == "manual" and s["pose"]["gripper"] < 64.9)
             ws.send_json({"action": "jog", "axes": {}})
@@ -344,7 +352,8 @@ def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
 @pytest.mark.parametrize("legacy_timing", [True, False])
 def test_saved_grip_edits_follow_the_path_timing_used_to_make_them(tmp_path, legacy_timing):
     session = Session(tmp_path)
-    session.config = Configuration(cameras=[])
+    original = ReplayProfile.STANDARD if legacy_timing else ReplayProfile.FAST
+    session.config = Configuration(cameras=[], replay_profile=original)
     session._command(Command(action="connect"))
     try:
         start = session.pose
@@ -356,7 +365,7 @@ def test_saved_grip_edits_follow_the_path_timing_used_to_make_them(tmp_path, leg
         ident = session._save_raw(samples, complete=True)
         base = session._compile_path(samples, start, exact_start=True, legacy_timing=legacy_timing)
         knots = [(0, 0), (0.5, -4), (1, 0)]
-        edited = GrippedPath(base, knots, CONTROL)
+        edited = GrippedPath(base, knots, base.settings)
         if legacy_timing:
             # Files from earlier versions only stored the fractional grip edit times.
             saved = json.loads(session._path_file(ident).read_text())
@@ -366,8 +375,12 @@ def test_saved_grip_edits_follow_the_path_timing_used_to_make_them(tmp_path, leg
             session.grip_assist = SimpleNamespace(result=lambda _: edited)
             session._finish_grip_assist()
             ident = session.path_id
+        session.config.replay_profile = (
+            ReplayProfile.FAST if legacy_timing else ReplayProfile.STANDARD
+        )
         session._load_path(ident)
         assert session.path.base.legacy_timing is legacy_timing
+        assert session._snapshot()["path"]["replay_profile"] == original
         assert session.path.duration == pytest.approx(edited.duration)
         for step in range(11):
             t = edited.duration * step / 10

@@ -4,7 +4,7 @@ import pytest
 
 from ghostpath.motion import JOINTS, SafetyFault
 from ghostpath.robot import Follower
-from ghostpath.session import CONTROL
+from ghostpath.session import CONTROL, FAST_REPLAY
 
 
 class Bus:
@@ -120,3 +120,28 @@ def test_automatic_move_preserves_existing_hold_and_skips_repeated_packets(rig):
     bus.reg["Goal_Position"]["wrist_flex"] = 2000
     with pytest.raises(SafetyFault, match="Wrist flex goal register changed"):
         arm.verify_goals()
+
+
+def test_fast_profile_is_verified_and_restores_standard_registers(rig, monkeypatch):
+    arm, bus = rig
+    arm.arm()
+    standard = {register: bus.reg[register].copy() for register in ("Goal_Speed", "Acceleration")}
+    bus.calls.clear()
+    arm.stream_profile(FAST_REPLAY)
+    assert [register for register, _ in bus.calls] == ["Goal_Speed", "Acceleration"]
+    for register, previous in standard.items():
+        assert all(bus.reg[register][j] > previous[j] > 0 for j in JOINTS)
+    assert arm.torque() == "on"
+
+    arm.stream_profile(FAST_REPLAY)
+    assert len(bus.calls) == 2
+    arm.stream_profile(CONTROL)
+    assert all(bus.reg[register] == values for register, values in standard.items())
+
+    write = bus.sync_write
+    monkeypatch.setattr(bus, "sync_write", lambda *args, **kwargs: None)
+    with pytest.raises(SafetyFault, match="verify the servo Goal_Speed profile"):
+        arm.stream_profile(FAST_REPLAY)
+    monkeypatch.setattr(bus, "sync_write", write)
+    arm.stream_profile(FAST_REPLAY)
+    assert all(bus.reg["Goal_Speed"][j] > standard["Goal_Speed"][j] for j in JOINTS)

@@ -21,6 +21,7 @@ class Robot(Protocol):
     def release(self) -> None: ...
     def arm(self, check: Callable[[], None] | None = None) -> Pose: ...
     def motion_start(self) -> tuple[Pose, Pose]: ...
+    def stream_profile(self, settings: Settings) -> None: ...
     def verify_goals(self) -> None: ...
     def send(self, pose: Pose, *, force: bool = False) -> Pose: ...
     def hold(self) -> None: ...
@@ -49,7 +50,7 @@ class Follower:
         self.settings = settings
         self.robot_id = robot_id
         self._configured = False
-        self._native_profile = False
+        self._stream_settings: Settings | None = None
         if set(self.robot.calibration) != set(JOINTS):
             raise ValueError(
                 f"Missing calibration at {self.robot.calibration_fpath}; "
@@ -170,10 +171,12 @@ class Follower:
         if set(bus.sync_read("Operating_Mode", normalize=False).values()) != {0}:
             raise SafetyFault("Could not verify position mode on every motor")
         self._configured = True
+        self._stream_settings = s
 
     def arm(self, check: Callable[[], None] | None = None) -> Pose:
         bus = self.robot.bus
         self._configure_limits()
+        self.stream_profile(self.settings)
         torque = bus.sync_read("Torque_Enable", normalize=False)
         measured = self.read()
         pose = Motion(measured, self.limits, self.settings).target
@@ -240,16 +243,17 @@ class Follower:
                     4 * distance / duration**2,
                 )
         if speeds:
-            self._native_profile = True
+            self._stream_settings = None
             self._set_profile(speeds, accelerations)
 
-    def stream_profile(self):
-        if self._native_profile:
+    def stream_profile(self, settings: Settings):
+        if settings != self._stream_settings:
+            self._stream_settings = None
             self._set_profile(
-                {j: self.settings.velocity(j) for j in JOINTS},
-                {j: self.settings.accel(j) for j in JOINTS},
+                {j: settings.velocity(j) for j in JOINTS},
+                {j: settings.accel(j) for j in JOINTS},
             )
-            self._native_profile = False
+            self._stream_settings = settings
 
     def verify_goals(self):
         goals = self.robot.bus.sync_read("Goal_Position", normalize=False, num_retry=1)
@@ -338,6 +342,9 @@ class SimulatedFollower:
         if not self.armed:
             raise SafetyFault("Torque is off")
         return self.read(), self.target.copy()
+
+    def stream_profile(self, settings: Settings):
+        self.settings = settings
 
     def verify_goals(self):
         pass

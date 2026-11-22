@@ -130,6 +130,12 @@ export function SetupPanel({ config, change, connect, available }: {
               {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(n => <option key={n} value={n}>{n === 1 ? '1.0' : n}×</option>)}
             </select></label>
           </div>
+          <label className="field">Taught-path motion profile
+            <select value={config.replay_profile} onChange={e => set('replay_profile', e.target.value as Config['replay_profile'])}>
+              <option value="standard">Standard</option>
+              <option value="fast">Fast · closer to teaching</option>
+            </select>
+          </label>
           <label className="field">Collection mode
             <select value={config.mode} onChange={e => set('mode', e.target.value as Config['mode'])}>
               {modes.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}

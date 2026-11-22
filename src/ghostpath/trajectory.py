@@ -187,6 +187,7 @@ class ReplayPath:
         self.keyframes = len(anchors)
         self.teaching_duration = anchors[-1].t - anchors[0].t
         self.legacy_timing = legacy_timing
+        self.settings = settings
         if max(abs(p[j] - poses[0][j]) for p in poses for j in JOINTS) < 0.5:
             raise ValueError("No movement detected within the replay limits.")
         minimum_span = 0.12 if legacy_timing else 2 / settings.fps

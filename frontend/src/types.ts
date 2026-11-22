@@ -4,6 +4,7 @@ export type Pose = Record<Joint, number>
 export type Phase = 'setup' | 'ready' | 'teaching' | 'teach_paused' | 'reset' | 'reset_released' | 'returning' |
   'replay' | 'manual' | 'processing' | 'review' | 'saving' | 'next' | 'finished' | 'fault'
 export type Mode = 'teach' | 'repeat' | 'hybrid'
+export type ReplayProfile = 'standard' | 'fast'
 
 export interface CameraSpec {
   name: string
@@ -23,6 +24,7 @@ export interface Config {
   dataset: string
   fps: number
   speed: number
+  replay_profile: ReplayProfile
   mode: Mode
   automatic_reset: boolean
   cameras: CameraSpec[]
@@ -85,7 +87,14 @@ export interface State {
   fault: string
   notice: string
   operation: string | null
-  path: { id: string; duration: number; teaching_duration: number; keyframes: number; chart: number[][] } | null
+  path: {
+    id: string
+    duration: number
+    teaching_duration: number
+    replay_profile: ReplayProfile
+    keyframes: number
+    chart: number[][]
+  } | null
   paths: { id: string; task: string; created: string; duration: number; grip_edited: boolean }[]
   dataset_path: string | null
   repo_id: string | null
@@ -98,7 +107,7 @@ export const camera = (name: string, source: number): CameraSpec => ({
 export const defaults: Config = {
   device: 'simulation', port: '', robot_id: 'my_awesome_follower_arm', calibration_dir: null,
   task: 'Pick up the orange block and place it in the tray', dataset: 'block-placement',
-  fps: 30, speed: 1, mode: 'teach', automatic_reset: false,
+  fps: 30, speed: 1, replay_profile: 'standard', mode: 'teach', automatic_reset: false,
   cameras: [camera('workspace', 0), camera('wrist', 1)],
 }
 

@@ -6,6 +6,7 @@ import os
 import re
 import time
 from concurrent.futures import Future
+from dataclasses import replace
 from datetime import UTC, datetime
 from math import cos, pi, sin
 from pathlib import Path
@@ -16,7 +17,7 @@ from uuid import uuid4
 from .cameras import CameraNotReady, Cameras, source_index
 from .dataset import Datasets, Record
 from .grip import CarryGripPath, GripAssist, GrippedPath
-from .models import Command, Configuration, Mode, Phase
+from .models import Command, Configuration, Mode, Phase, ReplayProfile
 from .motion import JOINTS, Motion, ParkTrajectory, Pose, SafetyFault, Settings
 from .poses import SavedStart, write_json
 from .robot import Follower, Robot, SimulatedFollower
@@ -55,6 +56,10 @@ CONTROL = Settings(
     max_lead=6,
     gripper_max_lead=9,
 )
+FAST_REPLAY = replace(
+    CONTROL, speed=120, acceleration=360, gripper_speed=100, gripper_acceleration=400
+)
+REPLAY_SETTINGS = {ReplayProfile.STANDARD: CONTROL, ReplayProfile.FAST: FAST_REPLAY}
 ACTIVE = {Phase.TEACHING, Phase.RESET_RELEASED, Phase.RETURNING, Phase.REPLAY, Phase.MANUAL}
 IDLE = {Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.REVIEW, Phase.NEXT, Phase.FINISHED}
 
@@ -362,6 +367,7 @@ class Session:
             phases = (Phase.MANUAL,) if action == "finish_manual" else (Phase.REPLAY, Phase.MANUAL)
             self._require(*phases)
             self.robot.hold()
+            self.robot.stream_profile(CONTROL)
             if self.record_index < 3:
                 self._begin_operation("stop_empty", self.datasets.discard())
                 self.notice = "Recording stopped before three frames were captured."
@@ -712,7 +718,9 @@ class Session:
         path = AlignedPath(origin, reverse, CONTROL)
         if self.grip_assist_enabled:
             self.grip_assist = GripAssist(self.path, path, path.prefix, carry_grip)
-        self._start_player(self.grip_assist or path, Phase.RETURNING, held=latched)
+        self._start_player(
+            self.grip_assist or path, Phase.RETURNING, held=latched, settings=self.path.settings
+        )
         self.notice = "Verify the scene before recording."
         if carry_grip is not None:
             count = len(carry_grip.grasps)
@@ -796,15 +804,19 @@ class Session:
             origin = item["start_pose"]
             self.motion.check_pose(origin)
             samples = [Sample(**sample) for sample in item["samples"]]
+            edited = "grip_edits" in item
+            # Grip offsets are indexed by fitted time and must use their original profile.
+            profile = ReplayProfile(item.get("grip_profile", "standard")) if edited else None
             base = self._compile_path(
                 samples,
                 origin,
                 exact_start=item.get("exact_start") is True,
-                legacy_timing="grip_edits" in item and item.get("grip_timing", 1) == 1,
+                legacy_timing=edited and item.get("grip_timing", 1) == 1,
+                profile=profile,
             )
             path = (
-                GrippedPath(base, [tuple(point) for point in item["grip_edits"]], CONTROL)
-                if "grip_edits" in item
+                GrippedPath(base, [tuple(point) for point in item["grip_edits"]], base.settings)
+                if edited
                 else base
             )
             self._set_path(path, ident)
@@ -819,13 +831,14 @@ class Session:
         *,
         exact_start: bool = False,
         legacy_timing: bool = False,
+        profile: ReplayProfile | None = None,
     ) -> ReplayPath:
         if samples and not self._near(origin, samples[0].pose):
             raise ValueError("The path begins outside its saved start tolerance.")
         path = ReplayPath(
             samples,
             self.motion,
-            CONTROL,
+            REPLAY_SETTINGS[profile or self.config.replay_profile],
             self.config.speed,
             joint_margin=self._joint_margin(),
             start_pose=origin if exact_start else None,
@@ -859,7 +872,7 @@ class Session:
         if assist is None:
             return
         try:
-            edited = assist.result(CONTROL)
+            edited = assist.result(self.path.settings)
             if edited is None:
                 return
             source = json.loads(self._path_file(self.path_id).read_text())
@@ -867,6 +880,9 @@ class Session:
             source.update(
                 grip_edits=edited.knots,
                 grip_timing=1 if edited.base.legacy_timing else 2,
+                grip_profile=(
+                    ReplayProfile.FAST if edited.settings == FAST_REPLAY else ReplayProfile.STANDARD
+                ),
                 source_path=self.path_id,
                 created=datetime.now(UTC).isoformat(),
             )
@@ -989,16 +1005,22 @@ class Session:
             return {**latched, **{j: actual[j] for j in LOAD_AXES}}
         return latched
 
-    def _start_player(self, path: MotionPath, phase: Phase, *, held: Pose | None = None):
-        motion = Motion(self.pose, self.robot.limits, CONTROL)
+    def _start_player(
+        self,
+        path: MotionPath,
+        phase: Phase,
+        *,
+        held: Pose | None = None,
+        settings: Settings = CONTROL,
+    ):
+        motion = Motion(self.pose, self.robot.limits, settings)
         if isinstance(self.robot, Follower) and isinstance(path, ParkTrajectory):
             self.robot.native_profile(path)
             self._assert_controller()
             self.last_tick = time.monotonic()
             self.player = NativePlayer(path, motion, self.last_tick, START_TOLERANCE)
         else:
-            if isinstance(self.robot, Follower):
-                self.robot.stream_profile()
+            self.robot.stream_profile(settings)
             self._assert_controller()
             self.last_tick = time.monotonic()
             motion.target = path.start
@@ -1059,7 +1081,7 @@ class Session:
             carry_grip = CarryGripPath(self.path, reverse=False) if self.firm_carry_grip else None
             self.replay_firm_carries = len(carry_grip.grasps) if carry_grip else None
             path = AlignedPath(origin, carry_grip or self.path, CONTROL)
-            self._start_player(path, Phase.REPLAY, held=latched)
+            self._start_player(path, Phase.REPLAY, held=latched, settings=self.path.settings)
             self._clear_teaching()
             self.notice = "Replaying the taught path and recording synchronized data."
         elif name == "seal":
@@ -1167,6 +1189,7 @@ class Session:
                 if self.reset_action == "park":
                     self.notice = "At rest. Boomerang can reset a reversible scene from here."
                 elif self.scene_reversed:
+                    self.robot.stream_profile(CONTROL)
                     self.notice = "Reverse motion complete. Verify the scene before recording."
                     self._finish_grip_assist()
                 else:
@@ -1179,6 +1202,8 @@ class Session:
             self._manual_tick(now, dt, stamp)
 
     def _start_manual(self, stamp: float, sent: Pose):
+        self.robot.stream_profile(CONTROL)
+        self._assert_controller()
         self.phase = Phase.MANUAL
         self.manual_started = stamp
         nominal = self.motion.hold(self._servo_origin(sent))
@@ -1244,6 +1269,7 @@ class Session:
         self.record_index += 1
 
     def _seal(self, *, stopped: bool = False):
+        self.robot.stream_profile(CONTROL)
         self.stopped_early = stopped
         self._begin_operation("seal", self.datasets.seal(stopped_early=stopped))
 
@@ -1346,6 +1372,11 @@ class Session:
                 "id": self.path_id,
                 "duration": round(self.path.duration, 2),
                 "teaching_duration": round(self.path.teaching_duration, 2),
+                "replay_profile": (
+                    ReplayProfile.FAST
+                    if self.path.settings == FAST_REPLAY
+                    else ReplayProfile.STANDARD
+                ),
                 "keyframes": self.path.keyframes,
                 "chart": self.chart,
             }
