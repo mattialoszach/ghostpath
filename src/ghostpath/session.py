@@ -216,6 +216,12 @@ class Session:
 
     def _command(self, cmd: Command):
         action = cmd.action
+        if self.fault and self.phase != Phase.FAULT and action not in {
+            "save",
+            "discard",
+            "disconnect",
+        }:
+            raise WorkflowError("Robot control is stopped. Save or discard the take first.")
         if action in {"configure", "connect"}:
             self._require(Phase.SETUP)
             if cmd.config:
@@ -1093,13 +1099,16 @@ class Session:
                 else "Capture passed validation. Review and save the episode."
             )
         elif name == "save":
-            self.phase = Phase.NEXT
+            self.phase = Phase.FAULT if self.fault else Phase.NEXT
             self.notice = "Episode saved."
         elif name in {"retry", "discard"}:
             self.quality = None
             self.progress = self.elapsed = 0.0
             self.phase = Phase.RESET if name == "retry" else Phase.NEXT
             self.notice = "Take discarded. Restore the scene to try again."
+            if self.fault:
+                self.phase = Phase.FAULT
+                self.notice = "Take discarded."
         elif name == "stop_empty":
             self.quality = None
             self.progress = self.elapsed = 0.0
@@ -1107,7 +1116,6 @@ class Session:
             self.notice = "Recording stopped before three frames were captured."
         elif name == "finish":
             self.phase = Phase.FINISHED
-            self.fault = ""
             self.notice = "LeRobot dataset finalized."
         elif name == "disconnect":
             self._disconnect()
@@ -1120,7 +1128,7 @@ class Session:
 
     def _tick(self, now: float):
         dt, self.last_tick = now - self.last_tick, now
-        if self.robot is None or self.phase in {Phase.SETUP, Phase.FAULT}:
+        if self.robot is None or self.fault or self.phase == Phase.SETUP:
             return
         if self.phase in {Phase.REPLAY, Phase.MANUAL} and self.datasets.error:
             raise SafetyFault(self.datasets.error)
@@ -1269,16 +1277,21 @@ class Session:
         self.record_index += 1
 
     def _seal(self, *, stopped: bool = False):
-        self.robot.stream_profile(CONTROL)
         self.stopped_early = stopped
         self._begin_operation("seal", self.datasets.seal(stopped_early=stopped))
+        self.robot.stream_profile(CONTROL)
 
     def _fail(self, message: str, save_teaching: bool = False):
         if self.phase == Phase.FAULT:
             return
         LOG.warning("GhostPath stopped during %s: %s", self.phase, message)
         teaching_was_active = self.phase == Phase.TEACHING
-        self.phase = Phase.FAULT
+        operation = self.operation[0] if self.operation else None
+        # Keep a completed capture available while the arm stays faulted. A
+        # writer failure clears its operation before entering this handler.
+        keep_take = self.phase == Phase.REVIEW or operation in {"seal", "save", "retry", "discard"}
+        if not keep_take:
+            self.phase = Phase.FAULT
         self.fault = message
         self.demo = None
         self.firm_carry_grip = False
@@ -1296,10 +1309,11 @@ class Session:
                 except Exception:
                     LOG.exception("Could not save interrupted teaching samples")
             self._clear_teaching()
-        if self.datasets and not self.datasets.broken:
-            self.operation = ("cleanup", self.datasets.discard())
         self.player = None
-        self.quality = None
+        if not keep_take:
+            if self.datasets and not self.datasets.broken:
+                self.operation = ("cleanup", self.datasets.discard())
+            self.quality = None
 
     def _snapshot(self):
         datasets = self.datasets

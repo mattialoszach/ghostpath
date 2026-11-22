@@ -288,7 +288,10 @@ def test_continue_appends_to_the_same_path_at_the_selected_start(tmp_path):
         session._close_devices()
 
 
-def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
+@pytest.mark.parametrize("lose_arm_in_review", [False, True])
+def test_replay_records_initial_alignment_and_manual_handoff(
+    tmp_path, monkeypatch, lose_arm_in_review
+):
     dataset_module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
     rest = SimulatedFollower(CONTROL).read()
     save_id = "20261120T000000-abcdef12"
@@ -334,9 +337,24 @@ def test_replay_records_initial_alignment_and_manual_handoff(tmp_path):
             wait_for(ws, lambda s: s["phase"] == "manual" and s["pose"]["gripper"] < 64.9)
             ws.send_json({"action": "jog", "axes": {}})
             ws.send_json({"action": "stop_recording"})
-            wait_for(ws, lambda s: s["phase"] == "review")
+            review = wait_for(ws, lambda s: s["phase"] == "review")
+            if lose_arm_in_review:
+                def unavailable():
+                    raise OSError("Motor link disconnected")
+
+                monkeypatch.setattr(app.state.session.robot, "read", unavailable)
+                stopped = wait_for(ws, lambda s: s["fault"] != "")
+                assert stopped["phase"] == "review"
+                assert stopped["quality"] == review["quality"]
+                with pytest.raises(WorkflowError, match="Robot control is stopped"):
+                    app.state.session._command(Command(action="hold_torque"))
+
             ws.send_json({"action": "save"})
-            wait_for(ws, lambda s: s["phase"] == "next" and s["accepted"] == 1)
+            next_phase = "fault" if lose_arm_in_review else "next"
+            wait_for(ws, lambda s: s["phase"] == next_phase and s["accepted"] == 1)
+            if lose_arm_in_review:
+                ws.send_json({"action": "finish"})
+                wait_for(ws, lambda s: s["phase"] == "finished")
 
     root = tmp_path / "datasets" / "block-placement"
     dataset = dataset_module.LeRobotDataset(

@@ -122,7 +122,7 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
   const atStart = state?.at_start
   const hasStart = Boolean(state?.start_pose)
   const canReturn = available && (simulated || state?.torque === 'on')
-  const canManagePower = Boolean(state?.connected && ['ready', 'teach_paused', 'reset', 'review', 'next', 'finished'].includes(phase))
+  const canManagePower = Boolean(state?.connected && !state.fault && ['ready', 'teach_paused', 'reset', 'review', 'next', 'finished'].includes(phase))
   const canDiscard = phase === 'teaching' || phase === 'teach_paused' ||
     Boolean(state?.path && ['reset', 'reset_released', 'returning'].includes(phase))
   const discardEpisode = (action: 'discard_episode' | 'discard' = 'discard_episode') => setConfirm({
@@ -304,14 +304,18 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
       break
     case 'review':
       title = 'Review this take'
-      detail = state?.stopped_early ? 'Recording stopped early. Review the captured portion before saving.'
+      detail = state?.fault ? 'The arm stopped after recording. You can still review and save this take.'
+        : state?.stopped_early ? 'Recording stopped early. Review the captured portion before saving.'
         : 'Check that the grasp held and the workspace stayed clear before saving.'
       controls = <>
         <button className="button quiet-danger" disabled={!available} onClick={() => discardEpisode('discard')}><X size={15} /> Discard episode</button>
-        <button className="button" disabled={!available} onClick={() => send('retry')}><RotateCcw size={15} /> Retry</button>
+        <button className="button" disabled={!available || Boolean(state?.fault)} onClick={() => send('retry')}><RotateCcw size={15} /> Retry</button>
         <button className="button primary" disabled={!available} onClick={() => send('save')}><Save size={15} /> Save episode</button>
       </>
-      extra = state && <ReviewControls state={state} reviewIndex={reviewIndex} change={setReviewIndex} />
+      extra = state && <>
+        {state.fault && <p className="hint" role="alert">{state.fault}</p>}
+        <ReviewControls state={state} reviewIndex={reviewIndex} change={setReviewIndex} />
+      </>
       break
     case 'next':
       title = state?.quality ? 'Episode saved' : 'Take discarded'
@@ -334,6 +338,9 @@ function Workflow({ state, config, send, available, reviewIndex, setReviewIndex 
     case 'fault':
       title = 'Workspace stopped'
       detail = state?.fault || 'Check the arm before resuming.'
+      if (state?.notice === 'Episode saved.' || state?.notice === 'Take discarded.') {
+        extra = <p className="hint" role="status">{state.notice}</p>
+      }
       controls = <>
         <button className="button" disabled={!available || Boolean(state?.operation)} onClick={() => send('disconnect')}><Radio size={15} /> Disconnect</button>
         <button className="button primary" disabled={!available || Boolean(state?.operation)} onClick={() => instruct('recover', 'Recover control?', 'Support the arm and clear the workspace. If torque is mixed, recovering will seed fresh measured goals before re-enabling it.', 'Recover')}><RotateCcw size={15} /> Recover</button>
