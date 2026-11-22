@@ -89,6 +89,8 @@ Joints are ordered `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, 
 
 During recording, GhostPath looks one robot sample ahead to avoid using a camera frame that the next sample needs. It can omit one isolated camera gap every two seconds. Review and the episode manifest report the omitted samples. The LeRobot video uses the configured constant FPS, and the actual timestamp fields retain the gaps.
 
+Review compares the teaching and planned path times with the measured alignment, traversal, and settling times for a completed replay. Path error compares encoder readings with the replay reference at the recorded sample time, after alignment. Command-to-encoder gaps also include any servo lookahead and load compensation. Both summaries are stored in the episode manifest.
+
 Open a saved dataset with LeRobot directly:
 
 ```python

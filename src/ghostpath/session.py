@@ -112,6 +112,8 @@ class Session:
         self.record_index = 0
         self.record_candidate: Record | None = None
         self.last_recorded_at = float("-inf")
+        self.replay_path_started: float | None = None
+        self.replay_timing: dict[str, float] | None = None
         self.manual_started = 0.0
         self.manual_finish = False
         self.manual_goal: Pose | None = None
@@ -1088,6 +1090,8 @@ class Session:
             self.replay_firm_carries = len(carry_grip.grasps) if carry_grip else None
             path = AlignedPath(origin, carry_grip or self.path, CONTROL)
             self._start_player(path, Phase.REPLAY, held=latched, settings=self.path.settings)
+            self.replay_path_started = None if path.prefix else self.player.started
+            self.replay_timing = None
             self._clear_teaching()
             self.notice = "Replaying the taught path and recording synchronized data."
         elif name == "seal":
@@ -1178,12 +1182,23 @@ class Session:
             self.elapsed = max(0, stamp - self.player.started)
             self.progress = min(1.0, self.player.cursor / self.player.path.duration)
             if self.phase == Phase.REPLAY:
+                on_path = self.player.cursor >= self.player.path.prefix
+                if self.replay_path_started is None and on_path:
+                    self.replay_path_started = stamp
                 self.progress = max(
                     0.0,
                     min(1.0, (self.player.cursor - self.player.path.prefix) / self.path.duration),
                 )
-                self._record(stamp, sent)
+                reference = self.player.motion.target if on_path else None
+                self._record(stamp, sent, reference=reference)
                 if done:
+                    path_start, settle_start = self.replay_path_started, self.player.ended
+                    if path_start is not None and settle_start is not None:
+                        self.replay_timing = {
+                            "alignment_seconds": round(path_start - self.player.started, 3),
+                            "motion_seconds": round(settle_start - path_start, 3),
+                            "settle_seconds": round(stamp - settle_start, 3),
+                        }
                     if self.manual_finish:
                         self._start_manual(stamp, sent)
                     else:
@@ -1252,14 +1267,16 @@ class Session:
         pose["gripper"] -= 47 * sin(pi * t) ** 4
         self.robot.teach(self.motion.clamp(pose))
 
-    def _record(self, stamp: float, sent: Pose, manual: bool = False):
+    def _record(
+        self, stamp: float, sent: Pose, manual: bool = False, *, reference: Pose | None = None
+    ):
         if self.datasets.error:
             raise SafetyFault(self.datasets.error)
         if self.record_origin is None:
             self.record_origin = stamp
         due = self.record_origin + self.record_index / self.config.fps
         prior = self.record_candidate
-        current = Record(stamp, self.pose, sent, manual)
+        current = Record(stamp, self.pose, sent, manual, reference)
         self.record_candidate = current
         if stamp < due:
             return
@@ -1278,7 +1295,9 @@ class Session:
 
     def _seal(self, *, stopped: bool = False):
         self.stopped_early = stopped
-        self._begin_operation("seal", self.datasets.seal(stopped_early=stopped))
+        self._begin_operation(
+            "seal", self.datasets.seal(stopped_early=stopped, replay_timing=self.replay_timing)
+        )
         self.robot.stream_profile(CONTROL)
 
     def _fail(self, message: str, save_teaching: bool = False):

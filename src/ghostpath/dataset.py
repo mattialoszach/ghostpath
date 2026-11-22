@@ -27,6 +27,7 @@ class Record:
     state: Pose
     action: Pose
     manual: bool
+    reference: Pose | None = None
 
 
 def _feature(dtype: str, names: list[str]) -> dict:
@@ -62,10 +63,13 @@ class Datasets:
         self.review_dir: TemporaryDirectory | None = None
         self.review_frames = 0
         self.samples = self.skipped_camera_samples = 0
-        self.started = self.last_sample = self.last_saved = 0.0
+        self.started = self.last_sample = self.first_saved = self.last_saved = 0.0
         self.last_camera_gap: float | None = None
         self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
+        self.path_frames = 0
+        self.max_arm_path_error = self.max_gripper_path_error = 0.0
+        self.replay_timing: dict[str, float] | None = None
         self.indices: dict[str, int] = {}
         self.pending_record: Record | None = None
         self.reserved_frames: list[CameraFrame] | None = None
@@ -193,6 +197,8 @@ class Datasets:
 
         if self.frames:
             self.max_gap = max(self.max_gap, stamp - self.last_saved)
+        else:
+            self.first_saved = stamp
         self.last_saved = stamp
         self.max_arm_error = max(
             self.max_arm_error, *(abs(action[j] - state[j]) for j in JOINTS[:-1])
@@ -200,6 +206,15 @@ class Datasets:
         self.max_gripper_error = max(
             self.max_gripper_error, abs(action["gripper"] - state["gripper"])
         )
+        if record.reference is not None:
+            reference = validate_pose(record.reference)
+            self.path_frames += 1
+            self.max_arm_path_error = max(
+                self.max_arm_path_error, *(abs(reference[j] - state[j]) for j in JOINTS[:-1])
+            )
+            self.max_gripper_path_error = max(
+                self.max_gripper_path_error, abs(reference["gripper"] - state["gripper"])
+            )
         frame = {
             "task": self.config.task.strip(),
             "observation.state": np.array(list(state.values()), np.float32),
@@ -238,14 +253,17 @@ class Datasets:
             self.review_frames += 1
         self.frames += 1
 
-    def seal(self, *, stopped_early: bool = False) -> Future:
-        return self.executor.submit(self._seal, stopped_early)
+    def seal(
+        self, *, stopped_early: bool = False, replay_timing: dict[str, float] | None = None
+    ) -> Future:
+        return self.executor.submit(self._seal, stopped_early, replay_timing)
 
-    def _seal(self, stopped_early: bool) -> dict:
+    def _seal(self, stopped_early: bool, replay_timing: dict[str, float] | None) -> dict:
         if self.pending_record is not None:
             pending, self.pending_record = self.pending_record, None
             self._store(pending)
         self.stopped_early = stopped_early
+        self.replay_timing = replay_timing
         return self._validate()
 
     def _validate(self) -> dict:
@@ -257,12 +275,20 @@ class Datasets:
             "stopped_early": self.stopped_early,
             "frames": self.frames,
             "seconds": round(self.frames / self.config.fps, 2),
+            "capture_span_seconds": round(self.last_saved - self.first_saved, 3),
             "max_gap_ms": round(self.max_gap * 1000, 1),
             "camera_skew_ms": round(self.max_skew * 1000, 1),
             "skipped_camera_samples": self.skipped_camera_samples,
             "sensor_offset_ms": round(self.max_sensor_offset * 1000, 1),
             "max_arm_error_deg": round(self.max_arm_error, 2),
             "max_gripper_error_pct": round(self.max_gripper_error, 2),
+            "max_arm_path_error_deg": (
+                round(self.max_arm_path_error, 2) if self.path_frames else None
+            ),
+            "max_gripper_path_error_pct": (
+                round(self.max_gripper_path_error, 2) if self.path_frames else None
+            ),
+            "replay_timing": self.replay_timing,
             "review_frames": self.review_frames,
         }
 
@@ -352,10 +378,13 @@ class Datasets:
         self.indices.clear()
         self.pending_record = self.reserved_frames = None
         self.samples = self.skipped_camera_samples = 0
-        self.started = self.last_sample = self.last_saved = 0.0
+        self.started = self.last_sample = self.first_saved = self.last_saved = 0.0
         self.last_camera_gap = None
         self.max_gap = self.max_skew = self.max_sensor_offset = 0.0
         self.max_arm_error = self.max_gripper_error = 0.0
+        self.path_frames = 0
+        self.max_arm_path_error = self.max_gripper_path_error = 0.0
+        self.replay_timing = None
 
     def finalize(self) -> Future:
         return self.executor.submit(self._finalize)

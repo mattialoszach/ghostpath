@@ -309,16 +309,40 @@ export function ReviewControls({ state, reviewIndex, change }: {
 }) {
   const quality = state.quality
   if (!quality) return null
+  const cameraCount = state.config.cameras.filter(camera => camera.record).length
+  const timing = quality.replay_timing
   return <div className="review-info">
     <div className="quality-grid">
-      <div><span>Frames</span><strong>{quality.frames}</strong></div>
-      <div><span>Duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
-      <div><span>Max frame gap</span><strong>{quality.max_gap_ms} ms</strong></div>
-      {quality.review_frames > 0 && <div><span>Camera skew</span><strong>{quality.camera_skew_ms} ms</strong></div>}
-      {!!quality.skipped_camera_samples && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
-      <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
-      <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
+      <div><span>Frames at {state.config.fps} FPS</span><strong>{quality.frames}</strong></div>
+      <div><span>Dataset duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
+      {state.path && <>
+        <div><span>Teaching time</span><strong>{state.path.teaching_duration.toFixed(2)} s</strong></div>
+        <div><span>Planned path time</span><strong>{state.path.duration.toFixed(2)} s</strong></div>
+      </>}
+      {quality.max_arm_path_error_deg != null && <div><span>Peak arm path error</span><strong>{quality.max_arm_path_error_deg}°</strong></div>}
+      {quality.max_gripper_path_error_pct != null && <div><span>Peak gripper path error</span><strong>{quality.max_gripper_path_error_pct}%</strong></div>}
+      {cameraCount > 0 && quality.skipped_camera_samples != null && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
     </div>
+    <details className="episode-options">
+      <summary><ChevronDown size={14} /> Capture and tracking details</summary>
+      <div>
+        <div className="quality-grid">
+          {quality.capture_span_seconds != null && <div><span>First to last saved frame</span><strong>{quality.capture_span_seconds.toFixed(2)} s</strong></div>}
+          {timing && <>
+            <div><span>Alignment</span><strong>{timing.alignment_seconds.toFixed(2)} s</strong></div>
+            <div><span>Path traversal</span><strong>{timing.motion_seconds.toFixed(2)} s</strong></div>
+            <div><span>Endpoint settling</span><strong>{timing.settle_seconds.toFixed(2)} s</strong></div>
+          </>}
+          <div><span>Max frame gap</span><strong>{quality.max_gap_ms} ms</strong></div>
+          {cameraCount > 1 && <div><span>Max camera-to-camera skew</span><strong>{quality.camera_skew_ms} ms</strong></div>}
+          {cameraCount > 0 && <div><span>Max camera-to-encoder offset</span><strong>{quality.sensor_offset_ms} ms</strong></div>}
+          <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
+          <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
+        </div>
+        <p className="hint">The nominal frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Camera timing uses frame arrival times on this computer.'}</p>
+        {quality.max_arm_path_error_deg != null && <p className="hint">Path error compares encoder readings with the replay reference at the same sample time. Servo commands can aim ahead of that reference.</p>}
+      </div>
+    </details>
     {quality.review_frames > 1 && <label className="scrub"><Film size={15} /><input aria-label="Review captured frames" type="range" value={reviewIndex} min={0} max={quality.review_frames - 1} onChange={e => change(Number(e.target.value))} /><span>{reviewIndex + 1}/{quality.review_frames}</span></label>}
   </div>
 }

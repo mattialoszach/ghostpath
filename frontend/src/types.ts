@@ -38,12 +38,20 @@ export interface Config {
 export interface Quality {
   frames: number
   seconds: number
+  capture_span_seconds?: number
   max_gap_ms: number
   camera_skew_ms: number
   skipped_camera_samples?: number
   sensor_offset_ms: number
   max_arm_error_deg: number
   max_gripper_error_pct: number
+  max_arm_path_error_deg?: number | null
+  max_gripper_path_error_pct?: number | null
+  replay_timing?: {
+    alignment_seconds: number
+    motion_seconds: number
+    settle_seconds: number
+  } | null
   review_frames: number
 }
 

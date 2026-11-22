@@ -31,16 +31,22 @@ def writer(tmp_path):
 def stage(writer, manual=False):
     writer.prepare().result(timeout=30)
     pose = SimulatedFollower(CONTROL).read()
+    reference = None if manual else {**pose, "shoulder_pan": 2, "gripper": 67}
     for i in range(6):
         command = {**pose, "shoulder_pan": 5 + i}
-        writer.offer(Record(100 + i / 15, pose, command, manual))
+        writer.offer(Record(100 + i / 15, pose, command, manual, reference))
     return writer.seal().result(timeout=30)
 
 
 def test_official_v3_roundtrip_discard_and_failed_save(writer, monkeypatch):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    assert stage(writer)["review_frames"] == 2
+    quality = stage(writer)
+    assert quality["review_frames"] == 2
+    assert quality["capture_span_seconds"] == 0.333
+    assert quality["max_arm_error_deg"] == 10
+    assert quality["max_arm_path_error_deg"] == 2
+    assert quality["max_gripper_path_error_pct"] == 2
     assert writer.review("front", 0).startswith(b"\xff\xd8")
     assert writer.review("preview", 0) is None
     writer.discard().result(timeout=30)
@@ -61,7 +67,7 @@ def test_official_v3_roundtrip_discard_and_failed_save(writer, monkeypatch):
         writer.save("bad-pass", "hybrid").result(timeout=30)
     assert writer.accepted == 1
     assert committed == {file: file.read_bytes() for file in writer._output_files()}
-    stage(writer, manual=True)
+    assert stage(writer, manual=True)["max_arm_path_error_deg"] is None
     writer.save("pass-2", "hybrid").result(timeout=30)
     writer.finalize().result(timeout=30)
 

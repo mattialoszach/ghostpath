@@ -36,10 +36,11 @@ def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):
     session.datasets = SimpleNamespace(error=None, offer=records.append)
     for i, stamp in enumerate((0.0, 0.017, 0.032, 0.043, 0.061, 0.077, 0.094, 0.112)):
         session.pose = {"gripper": float(i)}
-        session._record(stamp, {"gripper": float(i + 1)})
+        session._record(stamp, {"gripper": float(i + 1)}, reference={"gripper": float(i + 2)})
     assert [frame.timestamp for frame in records] == [0.0, 0.043, 0.094]
     assert [frame.state["gripper"] for frame in records] == [0, 3, 6]
     assert [frame.action["gripper"] for frame in records] == [1, 4, 7]
+    assert [frame.reference["gripper"] for frame in records] == [2, 5, 8]
 
 
 @pytest.mark.parametrize("powered_reset", [False, True])
@@ -338,6 +339,12 @@ def test_replay_records_initial_alignment_and_manual_handoff(
             ws.send_json({"action": "jog", "axes": {}})
             ws.send_json({"action": "stop_recording"})
             review = wait_for(ws, lambda s: s["phase"] == "review")
+            quality = review["quality"]
+            timing = quality["replay_timing"]
+            assert timing["alignment_seconds"] > 0
+            assert timing["motion_seconds"] == pytest.approx(ready["path"]["duration"], abs=0.15)
+            assert timing["settle_seconds"] >= 0.55
+            assert quality["max_arm_path_error_deg"] is not None
             if lose_arm_in_review:
                 def unavailable():
                     raise OSError("Motor link disconnected")
@@ -365,6 +372,7 @@ def test_replay_records_initial_alignment_and_manual_handoff(
     assert dataset[0]["observation.state"][3].item() == pytest.approx(0, abs=0.05)
     entries = json.loads((root / "ghostpath.json").read_text())["episodes"]
     assert entries[0]["manual_finish"]
+    assert entries[0]["replay_timing"] == timing
 
 
 @pytest.mark.parametrize("legacy_timing", [True, False])
