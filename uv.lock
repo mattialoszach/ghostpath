@@ -493,6 +493,7 @@ dev = [
 hardware = [
     { name = "lerobot", extra = ["dataset", "feetech", "hardware"] },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-libdispatch", marker = "sys_platform == 'darwin'" },
 ]
 record = [
     { name = "lerobot", extra = ["dataset"] },
@@ -507,6 +508,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2,<3" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin' and extra == 'hardware'", specifier = ">=12" },
+    { name = "pyobjc-framework-libdispatch", marker = "sys_platform == 'darwin' and extra == 'hardware'", specifier = ">=12" },
     { name = "pyserial", specifier = ">=3.5,<4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
@@ -1690,6 +1692,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/c9/0d0ab483254a753e8bdfe801fd5b2822448d3f3460c40290c8baef6ba46d/pyobjc_framework_coretext-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:e954c63241fa450dff15984f10e1e70a20f631100c5335d9857d1a156e80d04c", size = 31725, upload-time = "2026-10-30T10:37:10.805Z" },
     { url = "https://files.pythonhosted.org/packages/e5/56/8421ad521d80f2ddd41415e86475fbb4b68d7f4bae7ecbb7bb140937123d/pyobjc_framework_coretext-13.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:cc5e05ed2dc532cabf0a595230eb6ab39de13055239d9dfc08751225de6d7da5", size = 31211, upload-time = "2026-10-30T10:37:11.61Z" },
     { url = "https://files.pythonhosted.org/packages/d5/93/9ed600f6f68e60726b6e98f183d4de1f91a463cfffca1bdaadb33f7454cd/pyobjc_framework_coretext-13.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:5eba0d51a810ef36a031ebba1b2c39d2c48b545ddb071b6b4827c4c11a04b498", size = 31752, upload-time = "2026-10-30T10:37:12.409Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-libdispatch"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ca/67/ec3a8e6dce218dc78968d2a5580d7140b6d93541b76e6ab89147663e7d49/pyobjc_framework_libdispatch-13.0.tar.gz", hash = "sha256:840f8f719984b1128ce69e3a586cd10f89a394795885a54be8c1769158cf8555", size = 39627, upload-time = "2026-10-30T10:46:52.503Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/65/5e00c1e88e1f83c756c3170dbdd06af0f324f4cee148a851054cc2cd9f57/pyobjc_framework_libdispatch-13.0-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:d0f070fc479b14eb6da96cf7cb4f8034eaa254a3f78d0fd3962bb2eded6f3a4e", size = 15984, upload-time = "2026-10-30T10:39:43.74Z" },
+    { url = "https://files.pythonhosted.org/packages/71/81/166e67d3c77dc8c9b735153a6fb511f0b954b82283551d58917ec81091ed/pyobjc_framework_libdispatch-13.0-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:75d29e94aa56c505cc1da0763c69a6c93ba3dda8ad297948d4e491fe1d3c337c", size = 15999, upload-time = "2026-10-30T10:39:46.655Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/fa/4cdc9a5f1c387c3d04b594cb2451bb816662d88c4e08fc16f2081a5d4c9a/pyobjc_framework_libdispatch-13.0-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:e0607c241ffb17b380c25ff30eeaf64008ff4f7749c39604da82570400f582dc", size = 16280, upload-time = "2026-10-30T10:39:47.417Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/d3/15fcfa0f98bdfea20735b6e7ab4c17fc907785cb44c5646ccc2ba05a444e/pyobjc_framework_libdispatch-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:b725e5ea9a881258d94646a3e09287c3608d560539abe04c75ba8b95847fe999", size = 16025, upload-time = "2026-10-30T10:39:48.188Z" },
+    { url = "https://files.pythonhosted.org/packages/69/5e/4bfddd49a790c0ccae856f3dc94cfafbf416d46702ef67e2a3374a412f9f/pyobjc_framework_libdispatch-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:b41a078c5c6268baba39bc2b6580a2f4112709ab9146663b72eb67523ac99d72", size = 16299, upload-time = "2026-10-30T10:39:48.996Z" },
+    { url = "https://files.pythonhosted.org/packages/82/c2/6baa8c75c8a6a93c69a6e30c38a99cbce1c7b9c3bea04a9f58bb1d836767/pyobjc_framework_libdispatch-13.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:8b6e56d1be07ee39533ea528fd7a76010776bab88a7170d87fbfe69f1cb07a89", size = 16035, upload-time = "2026-10-30T10:39:49.759Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/de/6b351866052fa1ba3d3289f84f172f5861cba64f34f80dff9a69d1da457a/pyobjc_framework_libdispatch-13.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:17ddbf1895d231f031d0e47f598ffa6b65bbc0a6edc16ceda9474577d683ecfa", size = 16339, upload-time = "2026-10-30T10:39:50.612Z" },
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ record = ["lerobot[dataset]==0.7.0"]
 hardware = [
     "lerobot[hardware,feetech,dataset]==0.7.0",
     "pyobjc-framework-AVFoundation>=12; sys_platform == 'darwin'",
+    "pyobjc-framework-libdispatch>=12; sys_platform == 'darwin'",
 ]
 dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11"]
 

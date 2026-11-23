@@ -19,8 +19,10 @@ from ghostpath.camera_worker import _send
 
 with socket.socket(fileno=int(sys.argv[1])) as sock:
     _send(sock, b"I", b"camera-a")
+    _send(sock, b"M", b'{"device_id":"camera-a","width":160,"height":120}')
     while True:
-        _send(sock, b"F", bytes(160 * 120 * 3), time.monotonic())
+        stamp = time.monotonic()
+        _send(sock, b"F", bytes(160 * 120 * 3), stamp, stamp)
         time.sleep(0.03)
 """
 

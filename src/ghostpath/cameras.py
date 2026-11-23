@@ -1,6 +1,8 @@
 """Independent capture with timestamped RGB frame histories and preview JPEGs."""
 
 import io
+import json
+import math
 import re
 import socket
 import subprocess
@@ -40,7 +42,9 @@ def source_index(value: int | str) -> int | str:
             return index
     elif re.fullmatch(r"/dev/video[0-9]{1,3}", value):
         return value
-    raise ValueError("Use a camera index (0–63) or a Linux /dev/video device.")
+    elif sys.platform == "darwin" and re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", value):
+        return value
+    raise ValueError("Use a camera index (0–63), macOS device ID, or Linux /dev/video device.")
 
 
 def jpeg(image: Image.Image, small: bool = False) -> bytes:
@@ -89,6 +93,16 @@ class CameraFrame:
     sequence: int
     timestamp: float
     pixels: np.ndarray
+    arrival_timestamp: float | None = None
+    available_timestamp: float | None = None
+
+    @property
+    def arrived(self) -> float:
+        return self.timestamp if self.arrival_timestamp is None else self.arrival_timestamp
+
+    @property
+    def available(self) -> float:
+        return self.arrived if self.available_timestamp is None else self.available_timestamp
 
 
 def _match_frames(
@@ -158,11 +172,13 @@ class Capture:
         self.spec = spec
         self.condition = Condition()
         self.history: deque[CameraFrame] = deque(maxlen=12)
+        self.cadence: deque[float] = deque(maxlen=1 + 3 * spec.capture_fps)
         self.closed = Event()
         self.preview: bytes | None = None
         self.last_preview = 0.0
         self.problem = ""
         self.actual: float | None = None
+        self.mode: dict | None = None
         self.retrying = False
         self.sequence = 0
         self.thread = Thread(target=self._run, name=f"camera-{spec.name}", daemon=True)
@@ -170,7 +186,7 @@ class Capture:
     def _run(self):
         try:
             source = source_index(self.spec.source)
-            if sys.platform == "darwin" and isinstance(source, int):
+            if sys.platform == "darwin":
                 self._run_macos()
                 return
 
@@ -178,30 +194,35 @@ class Capture:
 
             cap = cv2.VideoCapture(source)
             try:
-                for stamp, pixels in capture_frames(cap, cv2, self.spec, self.closed):
-                    self._publish(stamp, pixels)
+                for stamp, pixels in capture_frames(cap, cv2, self.spec, self.closed, self._mode):
+                    self._publish(stamp, pixels, stamp)
             finally:
                 cap.release()
         except Exception as exc:
             self._clear_stream(str(exc) or type(exc).__name__)
 
     def _run_macos(self):
-        device_id = ""
+        source = str(self.spec.source)
+        device_id = "" if source.isdecimal() else source
         while not self.closed.is_set():
             try:
                 with _camera_process(self.spec, device_id) as receiver:
-                    _, identity = self._packet(receiver, b"I", time.monotonic() + 6.0)
+                    _, _, identity = self._packet(receiver, b"I", time.monotonic() + 6.0)
                     resolved_id = identity.decode()
                     if device_id and resolved_id != device_id:
                         raise RuntimeError("The capture process opened a different camera.")
                     device_id = resolved_id
+                    _, _, mode = self._packet(receiver, b"M", time.monotonic() + 8.0)
+                    self._mode(json.loads(mode))
                     timeout = 6.0
                     while not self.closed.is_set():
-                        stamp, raw = self._packet(receiver, b"F", time.monotonic() + timeout)
+                        stamp, arrival, raw = self._packet(
+                            receiver, b"F", time.monotonic() + timeout
+                        )
                         pixels = np.frombuffer(raw, dtype=np.uint8).reshape(
                             self.spec.height, self.spec.width, 3
                         )
-                        self._publish(stamp, pixels)
+                        self._publish(stamp, pixels, arrival)
                         timeout = 1.0
             except (OSError, RuntimeError, ValueError) as exc:
                 if self.closed.is_set():
@@ -211,8 +232,10 @@ class Capture:
 
     def _packet(
         self, receiver: socket.socket, expected: bytes, deadline: float
-    ) -> tuple[float, bytearray]:
-        kind, length, stamp = HEADER.unpack(self._receive(receiver, HEADER.size, deadline))
+    ) -> tuple[float, float, bytearray]:
+        kind, length, stamp, arrival = HEADER.unpack(
+            self._receive(receiver, HEADER.size, deadline)
+        )
         valid_size = (
             length == self.spec.height * self.spec.width * 3
             if kind == b"F"
@@ -220,10 +243,12 @@ class Capture:
         )
         if not valid_size or kind not in (expected, b"E"):
             raise RuntimeError("Could not read a valid camera frame.")
+        if kind == b"F" and not (math.isfinite(stamp) and math.isfinite(arrival)):
+            raise RuntimeError("The camera delivered an invalid timestamp.")
         payload = self._receive(receiver, length, deadline)
         if kind == b"E":
             raise RuntimeError(payload.decode(errors="replace"))
-        return stamp, payload
+        return stamp, arrival, payload
 
     def _receive(self, receiver: socket.socket, length: int, deadline: float) -> bytearray:
         data = bytearray(length)
@@ -242,37 +267,47 @@ class Capture:
             view = view[size:]
         return data
 
-    def _publish(self, stamp: float, pixels: np.ndarray):
-        preview = None
-        if stamp - self.last_preview >= 0.14:
-            preview = jpeg(Image.fromarray(pixels), small=True)
-            self.last_preview = stamp
+    def _mode(self, mode: dict):
         with self.condition:
-            self.history.append(CameraFrame(self.sequence, stamp, pixels))
+            self.mode = mode
+
+    def _publish(self, stamp: float, pixels: np.ndarray, arrival: float):
+        with self.condition:
+            if self.cadence and stamp <= self.cadence[-1]:
+                return
+            available = time.monotonic()
+            self.history.append(CameraFrame(self.sequence, stamp, pixels, arrival, available))
+            self.cadence.append(stamp)
             self.sequence += 1
             self.problem = ""
             self.retrying = False
-            if preview is not None:
-                self.preview = preview
-            if len(self.history) >= 8:
-                self.actual = (len(self.history) - 1) / (stamp - self.history[0].timestamp)
+            span = stamp - self.cadence[0]
+            if span >= 1:
+                self.actual = (len(self.cadence) - 1) / span
             self.condition.notify_all()
+        if available - self.last_preview >= 0.14:
+            preview = jpeg(Image.fromarray(pixels), small=True)
+            with self.condition:
+                self.preview = preview
+                self.last_preview = available
 
     def _clear_stream(self, problem: str, *, retrying: bool = False):
         with self.condition:
             self.problem = problem
             self.retrying = retrying
             self.history.clear()
+            self.cadence.clear()
             self.preview = None
             self.last_preview = 0.0
             self.actual = None
+            self.mode = None
             self.condition.notify_all()
 
     def _fresh(self, now: float) -> bool:
         return bool(
             not self.closed.is_set()
             and self.history
-            and now - self.history[-1].timestamp < STALE_AFTER
+            and now - self.history[-1].available < STALE_AFTER
             and not self.problem
         )
 
@@ -311,6 +346,7 @@ class Capture:
                 "problem": self.problem
                 or ("Camera frame is stale." if self.history and not ready else ""),
                 "fps": round(self.actual, 1) if self.actual and ready else 0,
+                "mode": self.mode,
             }
 
 

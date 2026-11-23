@@ -108,7 +108,7 @@ export function SetupPanel({ config, change, connect, available }: {
             {expanded === index && <div className="camera-fields">
               <div className="split">
                 <label className="field">Name<input value={spec.name} onChange={e => updateCamera(index, { name: e.target.value })} pattern="[a-z][a-z0-9_]{0,23}" required /></label>
-                <label className="field">Source<input value={spec.source} onChange={e => updateCamera(index, { source: e.target.value })} required /></label>
+                <label className="field">Source index or ID<input value={spec.source} onChange={e => updateCamera(index, { source: e.target.value })} required /></label>
               </div>
               <div className="split">
                 <label className="field">Resolution<select value={`${spec.width}x${spec.height}`} onChange={e => { const [width, height] = e.target.value.split('x').map(Number); updateCamera(index, { width, height }) }}>
@@ -253,7 +253,9 @@ function CameraTile({ spec, state, demo, online, review, datasetFps }: {
       {image && <div className="viewfinder"><i /><i /><i /><i /></div>}
     </div>
     <figcaption>
-      <span>{spec.width} × {spec.height} <b>·</b> {savedPreview ? datasetFps : status?.fps || spec.capture_fps} FPS</span>
+      <span>{status?.mode?.label && !savedPreview && <>{status.mode.label} <b>·</b> </>}
+        {status?.mode?.width ?? spec.width} × {status?.mode?.height ?? spec.height} <b>·</b>{' '}
+        {savedPreview ? `${datasetFps} FPS` : status?.fps ? `${status.fps} measured FPS` : `${spec.capture_fps} FPS requested`}</span>
       <span className={spec.record ? 'record-source' : ''}>{spec.record ? <><span className="tiny-dot" /> {savedPreview ? 'Recorded' : 'Record'}</> : <><Eye size={12} /> Preview only</>}</span>
     </figcaption>
   </figure>

@@ -55,6 +55,16 @@ export interface Quality {
   review_frames: number
 }
 
+export interface CameraMode {
+  device_id?: string
+  label: string
+  width: number
+  height: number
+  nominal_fps?: number | null
+  format?: string
+  timestamp_source: 'avfoundation_pts' | 'host_read'
+}
+
 export interface GripState {
   enabled: boolean
   ready: boolean
@@ -90,7 +100,7 @@ export interface State {
   grip: GripState | null
   tracking_joint: Joint | null
   limits: Record<Joint, [number, number]> | null
-  cameras: Record<string, { ready: boolean; retrying?: boolean; problem: string; fps: number }>
+  cameras: Record<string, { ready: boolean; retrying?: boolean; problem: string; fps: number; mode?: CameraMode | null }>
   episode: number
   accepted: number
   frames: number

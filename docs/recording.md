@@ -4,10 +4,18 @@ Start with the [simulator walkthrough](../README.md#try-it-without-a-robot), the
 
 ## Set up the cameras
 
-- Expand **Cameras** to set each camera’s OpenCV device index, resolution, and capture FPS. On Linux, a `/dev/videoN` source also works. To find the indices, run `uv run --locked --extra hardware lerobot-find-cameras opencv` with GhostPath disconnected.
+- Expand **Cameras** to set each camera’s source, resolution, and capture FPS. On Linux, a `/dev/videoN` source also works. On macOS, use the `device_id` reported by the check below as the source to bind a view to the same device instead of relying on its index.
 - Use the **Record** switches to include or exclude views. A camera with the switch off is preview-only. Remove the camera rows if you don’t need live video either.
 - Start with **20 dataset FPS** for two **30 FPS** cameras. Dataset FPS controls the export rate, not how often the arm is controlled. If frames go missing or the cameras can’t keep up, try a lower dataset FPS or smaller camera resolution.
 - On macOS, grant camera access to the app you launch GhostPath from. If a camera says **Reconnecting**, GhostPath is trying to reopen it. Check the camera view and its reported rate before the next take.
+
+With GhostPath disconnected, measure both cameras at once without opening the robot connection:
+
+```sh
+uv run --locked --extra hardware python -m ghostpath.camera_check 0 1 --width 1280 --height 720 --seconds 30
+```
+
+Compare delivered FPS and frame gaps, not just nominal FPS, before raising resolution. GhostPath uses native sizes and does not silently resize a different camera mode. On macOS the report uses AVFoundation presentation timestamps; they are mapped to the host clock but are not a physical exposure measurement.
 
 ## Teach and reset
 
