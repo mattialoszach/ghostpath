@@ -63,7 +63,7 @@ export function SetupPanel({ config, change, connect, available }: {
           <legend>Robot</legend>
           <div className="segmented" role="group" aria-label="Robot source">
             <button type="button" aria-pressed={config.device === 'simulation'} className={config.device === 'simulation' ? 'selected' : ''} onClick={() => set('device', 'simulation')}><Monitor size={14} /> Simulator</button>
-            <button type="button" aria-pressed={config.device === 'so101'} className={config.device === 'so101' ? 'selected' : ''} onClick={() => change({ ...config, device: 'so101', fps: config.device === 'simulation' && config.fps === 30 ? 20 : config.fps })}><Cpu size={14} /> SO-101</button>
+            <button type="button" aria-pressed={config.device === 'so101'} className={config.device === 'so101' ? 'selected' : ''} onClick={() => set('device', 'so101')}><Cpu size={14} /> SO-101</button>
           </div>
           {config.device === 'so101' && <div className="hardware-fields">
             <div className="field">
@@ -97,6 +97,8 @@ export function SetupPanel({ config, change, connect, available }: {
       <details className="setup-section">
         <summary><Video size={16} /> Cameras <span className="disclosure-value">{recorded} recorded</span><ChevronDown size={14} /></summary>
         <div className="setup-section-content">
+        <p className="hint">ACT baseline: keep both views at 640 × 480 and 30 capture FPS, with 20 dataset FPS.</p>
+        {config.device === 'so101' && config.cameras.some(spec => spec.record && spec.capture_fps === config.fps) && <p className="hint">Dataset FPS equals a camera’s requested rate. Use a lower dataset FPS if the measured rate is lower or you see gaps.</p>}
         <div className="camera-settings">
           {config.cameras.map((spec, index) => <div className="camera-setting" key={index}>
             <div className="camera-option">

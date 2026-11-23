@@ -4,6 +4,7 @@ from time import monotonic
 import numpy as np
 import pytest
 
+from ghostpath.camera_check import _check_export
 from ghostpath.cameras import CameraFrame, Cameras
 from ghostpath.dataset import Datasets, Record
 from ghostpath.models import CameraSpec, Configuration
@@ -97,6 +98,14 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     with pytest.raises(ValueError, match="missed a recording deadline"):
         writer.seal().result(timeout=30)
     assert writer.accepted == 0
+
+
+def test_preflight_roundtrips_images_and_causal_timestamps(writer):
+    stage(writer)
+    result = _check_export(writer, expected=6)
+    assert result["frames"] == 6
+    assert result["video_bytes"] > 0
+    assert result["dataset_fps"] == 15
 
 
 def test_rejects_video_and_telemetry_frame_count_mismatch(writer, monkeypatch):

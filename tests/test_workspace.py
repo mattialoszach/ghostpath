@@ -29,6 +29,16 @@ def wait_for(ws, predicate):
     raise AssertionError("Expected workflow transition")
 
 
+def test_default_collection_uses_two_vga_cameras_with_rate_headroom():
+    config = Configuration()
+    assert config.fps == 20
+    assert [camera.name for camera in config.cameras] == ["workspace", "wrist"]
+    assert all(
+        camera.record and (camera.width, camera.height, camera.capture_fps) == (640, 480, 30)
+        for camera in config.cameras
+    )
+
+
 def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):
     session = Session(tmp_path)
     session.config = Configuration(fps=20)

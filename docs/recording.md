@@ -6,16 +6,23 @@ Start with the [simulator walkthrough](../README.md#try-it-without-a-robot), the
 
 - Expand **Cameras** to set each camera’s source, resolution, and capture FPS. On Linux, a `/dev/videoN` source also works. On macOS, use the `device_id` reported by the check below as the source to bind a view to the same device instead of relying on its index.
 - Use the **Record** switches to include or exclude views. A camera with the switch off is preview-only. Remove the camera rows if you don’t need live video either.
-- Start with **20 dataset FPS** for two **30 FPS** cameras. Dataset FPS controls the export rate, not how often the arm is controlled. Try native **1920 × 1080** if both cameras pass the delivery and recording checks; use **1280 × 720** if you need more processing headroom or longer takes show gaps.
+- Default to **640 × 480 at 30 capture FPS** for both views and **20 dataset FPS**. Dataset FPS controls the export rate, not how often the arm is controlled. This lets the cameras supply distinct frames even if they run slightly below nominal FPS. Use 720p or 1080p only if VGA is missing task-relevant detail after you have checked framing and focus.
 - On macOS, grant camera access to the app you launch GhostPath from. If a camera says **Reconnecting**, GhostPath is trying to reopen it. Check the camera view and its reported rate before the next take.
 
 With GhostPath disconnected, measure both cameras at once without opening the robot connection:
 
 ```sh
-uv run --locked --extra hardware python -m ghostpath.camera_check 0 1 --width 1280 --height 720 --seconds 30
+uv run --locked --extra hardware python -m ghostpath.camera_check 0 1 --seconds 30 --dataset-fps 20
 ```
 
-Compare delivered FPS and frame gaps, not just nominal FPS, before raising resolution. GhostPath uses native sizes and does not silently resize a different camera mode. On macOS the report uses AVFoundation presentation timestamps; they are mapped to the host clock but are not a physical exposure measurement.
+This checks both streams at once and writes and reads back a temporary LeRobot episode using synthetic joint telemetry. It doesn't move the arm or add anything to your datasets. Omit `--dataset-fps` to check camera delivery alone. GhostPath uses native sizes and does not silently resize a different camera mode. On macOS the report uses AVFoundation presentation timestamps; they are mapped to the host clock but are not a physical exposure measurement.
+
+## Collect an ACT baseline
+
+- Keep the same camera names, mounts, resolution, and lighting for the dataset. In the workspace view, check that the full pickup area and destination are visible; in the wrist view, check that the jaws and target are sharp through approach and release. If two identical blocks are visible, remove the distractor or make the task instruction and demonstrations unambiguous.
+- Use **Standard limits** for the first supervised take. Review grasp, carry, and release, and keep only successful, continuous takes. Start with a few successful pilots before collecting a larger set. Vary the block's starting positions within the area you plan to use at deployment instead of repeating one identical reset; reserve whole episodes or positions for a held-out evaluation.
+- Keep your VGA recordings. Start ACT with both full frames. If training or inference is the bottleneck, compare an aspect-preserving **320 × 240** input on the same episodes and held-out rollouts, using the same preprocessing at deployment. Don't crop away a pickup or placement area to fit a model.
+- PPO doesn't prescribe an image size. If you use it later, pick a size for the simulator or environment and measure rollout speed and success. Standard PPO needs policy rollouts and rewards; these demonstration datasets are directly useful for imitation.
 
 ## Teach and reset
 
@@ -54,7 +61,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 root = Path("data/datasets/block-placement")  # Choose a newly recorded (manifest v2) dataset.
 manifest = json.loads((root / "ghostpath.json").read_text())
 assert manifest["version"] == 2
-episodes = [entry["episode"] for entry in manifest["episodes"] if not entry["discontinuities"]]
+episodes = [
+    entry["episode"]
+    for entry in manifest["episodes"]
+    if not entry["skipped_camera_samples"] and not entry["stopped_early"]
+]
 if not episodes:
     raise ValueError("No continuous episodes selected for training.")
 dataset = LeRobotDataset(

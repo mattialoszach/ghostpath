@@ -54,7 +54,7 @@ class Configuration(StrictModel):
     calibration_dir: Path | None = None
     task: str = Field(default="Pick up the orange block and place it in the tray", max_length=500)
     dataset: str = Field(default="block-placement", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    fps: int = Field(default=30, ge=10, le=30)
+    fps: int = Field(default=20, ge=10, le=30)
     speed: float = Field(default=1.0, ge=0.25, le=2)
     replay_profile: ReplayProfile = ReplayProfile.STANDARD
     mode: Mode = Mode.TEACH
