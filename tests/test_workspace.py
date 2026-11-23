@@ -32,11 +32,23 @@ def wait_for(ws, predicate):
 def test_default_collection_uses_two_vga_cameras_with_rate_headroom():
     config = Configuration()
     assert config.fps == 20
+    assert config.mac_camera_buffer_ms == 75
     assert [camera.name for camera in config.cameras] == ["workspace", "wrist"]
     assert all(
         camera.record and (camera.width, camera.height, camera.capture_fps) == (640, 480, 30)
         for camera in config.cameras
     )
+
+
+def test_connection_uses_the_selected_mac_camera_buffer(tmp_path):
+    session = Session(tmp_path)
+    config = Configuration(cameras=[], mac_camera_buffer_ms=68)
+    try:
+        session._command(Command(action="connect", config=config))
+        assert session.cameras.avfoundation_buffer == pytest.approx(0.068)
+        assert session._snapshot()["config"]["mac_camera_buffer_ms"] == 68
+    finally:
+        session._close_devices()
 
 
 def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):

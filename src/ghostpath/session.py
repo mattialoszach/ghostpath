@@ -554,7 +554,11 @@ class Session:
         self.robot, self.pose, self.power, self.motion = robot, pose, power, motion
         self.rest_pose = self._read_saved_pose(rest=True)
         self._refresh_paths()
-        self.cameras = Cameras(self.config.cameras, self.config.device == "simulation")
+        self.cameras = Cameras(
+            self.config.cameras,
+            self.config.device == "simulation",
+            avfoundation_buffer=self.config.mac_camera_buffer_ms / 1000,
+        )
         self.cameras.demo_pose = pose
         self.cameras.open()
         self.phase = Phase.READY

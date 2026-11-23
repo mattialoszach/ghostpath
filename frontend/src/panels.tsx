@@ -151,6 +151,13 @@ export function SetupPanel({ config, change, connect, available }: {
           </div>
           <p className="hint" id="replay-timing-hint">Replay can run slower than the target pace to stay within these limits.</p>
           {config.device === 'so101' && <>
+            {recorded > 0 && <label className="field">Camera timing (macOS)
+              <select value={config.mac_camera_buffer_ms} onChange={e => set('mac_camera_buffer_ms', e.target.value === '68' ? 68 : 75)} aria-describedby="camera-timing-hint">
+                <option value={75}>Standard buffer · 75 ms</option>
+                <option value={68}>Lower delay · 68 ms</option>
+              </select>
+              <small className="hint" id="camera-timing-hint">Try Lower delay on a pilot take. Use it for collection only if you see no skipped samples.</small>
+            </label>}
             <label className="field">Calibration directory<input value={config.calibration_dir ?? ''} onChange={e => set('calibration_dir', e.target.value || null)} placeholder="Default LeRobot directory" /></label>
             <label className="check"><input type="checkbox" checked={config.automatic_reset} onChange={e => set('automatic_reset', e.target.checked)} /> Allow automatic arm reset</label>
           </>}

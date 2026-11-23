@@ -79,7 +79,7 @@ def test_pairing_cannot_see_frames_that_were_not_yet_available():
     assert [frame.sequence for frame in manager.frames(stamp + 0.006, {}, {"workspace": 0})] == [1]
 
 
-@pytest.mark.parametrize(("buffer", "expected"), [(0.105, 0), (0.075, 1)])
+@pytest.mark.parametrize(("buffer", "expected"), [(0.105, 0), (0.075, 1), (0.068, 2)])
 def test_avfoundation_pairs_at_a_stable_input_delay(buffer, expected):
     manager = cameras.Cameras(
         [CameraSpec(name="workspace", source=0)], simulation=False, avfoundation_buffer=buffer
@@ -93,6 +93,10 @@ def test_avfoundation_pairs_at_a_stable_input_delay(buffer, expected):
     ))
     capture.history.append(cameras.CameraFrame(
         1, stamp - 0.08, image, arrival_timestamp=stamp - 0.01
+    ))
+    capture.history.append(cameras.CameraFrame(2, stamp - 0.07, image))
+    capture.history.append(cameras.CameraFrame(
+        3, stamp - 0.069, image, available_timestamp=stamp + 0.030
     ))
     hits = manager.frames(stamp + 0.025, {}, {}, scheduled=stamp)
     assert [frame.sequence for frame in hits] == [expected]
@@ -129,7 +133,7 @@ def test_pairing_comparison_accounts_for_frames_that_arrive_late_and_cannot_be_r
         )
     }
     assert {buffer: result["missed_rows"] for buffer, result in comparison.items()} == {
-        105: 0, 90: 0, 75: 0, 60: 1, 0: 1,
+        105: 0, 90: 0, 75: 0, 68: 0, 60: 1, 0: 1,
     }
     baseline_age = comparison[105]["image_age_ms"]["workspace"]["p50"]
     assert comparison[75]["image_age_ms"]["workspace"]["p50"] < baseline_age

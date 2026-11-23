@@ -25,7 +25,7 @@ from .dataset import Datasets, Record, load_dataset_backend
 from .models import CameraSpec, Configuration
 from .motion import JOINTS
 
-BUFFER_OPTIONS_MS = (105, 90, 75, 60, 0)
+BUFFER_OPTIONS_MS = (105, 90, 75, 68, 60, 0)
 
 
 def compare_pairing(
