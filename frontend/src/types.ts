@@ -1,7 +1,7 @@
 export const joints = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper'] as const
 export type Joint = typeof joints[number]
 export type Pose = Record<Joint, number>
-export type Phase = 'setup' | 'ready' | 'teaching' | 'teach_paused' | 'reset' | 'reset_released' | 'returning' |
+export type Phase = 'setup' | 'ready' | 'practice' | 'teaching' | 'teach_paused' | 'reset' | 'reset_released' | 'returning' |
   'replay' | 'manual' | 'processing' | 'review' | 'saving' | 'next' | 'finished' | 'fault'
 export type Mode = 'teach' | 'repeat' | 'hybrid'
 export type ReplayProfile = 'standard' | 'fast'

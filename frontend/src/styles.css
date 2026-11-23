@@ -313,7 +313,7 @@ progress::-moz-progress-bar { background: var(--accent); }
 .quality-grid > div, .virtual-grid label { display: flex; gap: 4px; justify-content: space-between; align-items: center; color: #c2b7be; border: 1px solid var(--line); border-radius: 6px; padding: 6px; font-size: 11px; }
 .quality-grid strong { color: #f2d8cb; font: 11px var(--mono); }
 .manual-controls { display: grid; gap: 7px; }
-.manual-controls:focus { outline: none; }
+.manual-controls:focus { outline: 1px solid var(--accent); outline-offset: 2px; }
 .keyboard-legend { padding: 9px 12px; background: #242023; border: 1px solid var(--line); border-radius: 8px; }
 .keyboard-legend p { margin: 0 0 8px; color: var(--muted); font-size: 11px; }
 .keyboard-legend dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 5px 14px; margin: 0; }

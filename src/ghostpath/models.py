@@ -12,6 +12,7 @@ class StrictModel(BaseModel):
 class Phase(StrEnum):
     SETUP = "setup"
     READY = "ready"
+    PRACTICE = "practice"
     TEACHING = "teaching"
     TEACH_PAUSED = "teach_paused"
     RESET = "reset"
@@ -109,6 +110,9 @@ class Command(StrictModel):
         "reverse_reset",
         "grip_adjust",
         "replay",
+        "practice",
+        "finish_practice",
+        "take_over",
         "jog",
         "finish_manual",
         "stop_recording",
@@ -131,6 +135,7 @@ class Command(StrictModel):
     grip_assist: bool = False
     grip_direction: Literal[-1, 0, 1] = 0
     axes: dict[str, float] = Field(default_factory=dict, max_length=6)
+    immediate_stop: bool = False
     path_id: str = ""
     pose_id: str = ""
     pose_label: str = Field(default="", max_length=60)

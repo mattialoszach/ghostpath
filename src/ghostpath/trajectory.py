@@ -523,7 +523,7 @@ class ServoPlayer(Player):
             )
         return lag
 
-    def step(self, now: float, observed: Pose) -> tuple[Pose, bool]:
+    def check_issued(self, observed: Pose):
         settings = self.motion.settings
         self.motion.check_measurement(observed)
         for joint in JOINTS:
@@ -534,6 +534,10 @@ class ServoPlayer(Player):
                     f"{name} tracking limit exceeded (measured {observed[joint]:.1f}{unit}, "
                     f"sent {self.issued[joint]:.1f}{unit}). Check for load or obstruction."
                 )
+
+    def step(self, now: float, observed: Pose) -> tuple[Pose, bool]:
+        settings = self.motion.settings
+        self.check_issued(observed)
         dt = min(max(0.0, now - self.last), 1.3 / settings.fps)
         target, done = super().step(now, observed)
         self.trim.update(dt, target, observed)

@@ -414,13 +414,15 @@ class Datasets:
         self, path_id: str, mode: str, *,
         manual_finish: bool = False, firm_carry_grip: bool = False,
         start_pose: Pose | None = None, rest_pose: Pose | None = None,
+        manual_takeover_seconds: float | None = None,
     ) -> Future:
         poses = {
             "task_start": start_pose.copy() if start_pose is not None else None,
             "rest": rest_pose.copy() if rest_pose is not None else None,
         }
         return self.executor.submit(
-            self._save, path_id, mode, manual_finish, firm_carry_grip, poses
+            self._save, path_id, mode, manual_finish, firm_carry_grip, poses,
+            manual_takeover_seconds,
         )
 
     def _policy_io(self) -> dict:
@@ -450,7 +452,7 @@ class Datasets:
 
     def _save(
         self, path_id: str, mode: str, manual_finish: bool, firm_carry_grip: bool,
-        poses: dict[str, Pose | None],
+        poses: dict[str, Pose | None], manual_takeover_seconds: float | None,
     ):
         quality = self._validate()
         record = {
@@ -463,6 +465,8 @@ class Datasets:
             "poses": poses,
             **quality,
         }
+        if manual_takeover_seconds is not None:
+            record["manual_takeover_seconds"] = manual_takeover_seconds
         accepted_before = self._output_files()
         trace_path = self.root / "control" / f"episode-{self.accepted:06d}.json"
         if self.control_trace:

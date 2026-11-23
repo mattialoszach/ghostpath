@@ -50,9 +50,11 @@ If the gripper slips on a rigid object, try **Episode options → Firm grip**. I
 | --- | --- |
 | Teach every episode | **Teach a new path** is the suggested next step. |
 | Repeat path | **Reuse this path** is suggested, so you can reset the scene and record again. |
-| Hybrid / manual finish | **Keyboard finish** is selected. After replay settles, you can take over while the same recording continues. |
+| Hybrid / manual finish | **Manual finish** is selected. The manual controls open automatically when replay settles. |
 
-For keyboard finish, hold **Space** and a direction key shown on screen, or hold one of the jog buttons. Releasing Space or the button stops jogging. Select **Finish recording** to review. The keyboard pairs are **A/D** (shoulder pan), **W/S** (shoulder lift), **↑/↓** (elbow), **I/K** (wrist flex), **J/L** (wrist roll), and **C/O** (gripper).
+Use **Practice controls** before teaching to try the same controls without recording or saving poses. **Done** holds the current position and exits practice. **Return to rest** exits practice and parks at the explicitly saved rest pose; clear and supervise the route first.
+
+During replay, select **Take over** to stop the taught trajectory and continue the same recording under manual control. Replay does not resume. To move, focus the control panel and hold a direction key (no Space modifier), or hold an on-screen jog button. Release to ease to a stop; loss of focus or stale movement input cancels the jog immediately. The keyboard pairs are **A/D** (shoulder pan), **W/S** (shoulder lift), **↑/↓** (elbow), **I/K** (wrist flex), **J/L** (wrist roll), and **C/O** (gripper). Use **Finish recording** to review the full take.
 
 In review, scrub the camera previews and check **Capture and tracking details**. The scrubber shows sampled stills, not every exported frame. Path error compares encoder readings to the replay reference at that instant. The command-to-encoder gap also reflects servo lookahead and load compensation, so the two numbers don’t have to match. **Retry this path** discards the take and returns to reset. **Save episode** keeps it. When you’re done, **Finish dataset** closes the session and displays the local export path.
 
@@ -61,6 +63,8 @@ In review, scrub the camera previews and check **Capture and tracking details**.
 ## Read the export
 
 GhostPath uses the LeRobot v3.0 writer (Parquet, H.264 video, and metadata). Video encoding runs during capture; a save is rejected if the encoded frame count does not match the telemetry rows for every view. The `ghostpath.json` manifest links each accepted episode to its taught path and reports native modes, device IDs on macOS, and camera timing. **Capture and tracking details** in review compares measured camera FPS with dataset FPS and shows image age at encoder read end, delivery time from the frame timestamp to GhostPath availability, and time spent waiting after delivery. Saved episodes also keep the full control trace for comparing the measured position, reference, command, and replay rate during tracking excursions. By default raw teaching traces and saved poses stay in the local workspace; none of this is uploaded.
+
+Manual segments are labeled `ghostpath.manual` in the same episode. For an explicit takeover, `manual_takeover_seconds` in `ghostpath.json` marks when replay yielded control, relative to the start of recording.
 
 ```python
 import json

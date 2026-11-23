@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { GripPanel } from './grip'
 import {
-  CameraPanel, KeyboardLegend, ManualControls, ReviewMetrics, SavedPaths, SetupPanel, Telemetry, Timeline,
+  CameraPanel, ManualControls, ReviewMetrics, SavedPaths, SetupPanel, Telemetry, Timeline,
   VirtualJoints,
 } from './panels'
 import { useWorkspace } from './socket'
@@ -24,11 +24,11 @@ const steps = [
 ]
 
 const stepFor: Record<Phase, number> = {
-  setup: -1, ready: 0, teaching: 0, teach_paused: 0, reset: 1, reset_released: 1, returning: 1,
+  setup: -1, ready: 0, practice: 0, teaching: 0, teach_paused: 0, reset: 1, reset_released: 1, returning: 1,
   replay: 2, manual: 2, processing: 2, review: 3, saving: 3, next: 3, finished: 4, fault: -1,
 }
 
-const activePhases: Phase[] = ['teaching', 'reset_released', 'returning', 'replay', 'manual']
+const activePhases: Phase[] = ['practice', 'teaching', 'reset_released', 'returning', 'replay', 'manual']
 type Confirm = { title: string; text: string; label: string; submit: () => void }
 
 function Header({ state, online, available, send }: { state: State | null; online: boolean; available: boolean; send: Send }) {
@@ -188,6 +188,11 @@ function Workflow({ state, config, send, available }: {
     'Empty the gripper and clear the entire route. The arm will move directly to the rest pose, not the episode start.',
     'Return to rest', { allow_auto_reset_once: !config.automatic_reset },
   )
+  const startPractice = () => instruct(
+    'practice', 'Try the manual controls?',
+    'Clear the arm’s workspace. If torque is off, support the arm while the motors engage. Nothing is recorded in practice.',
+    'Start practice',
+  )
   const torqueOn = state?.torque === 'on'
   const changePower = () => torqueOn
     ? instruct('release_torque', 'Turn torque off?', 'Support the arm and empty the gripper first. The arm can drop when its motors release.', 'Turn torque off')
@@ -221,7 +226,7 @@ function Workflow({ state, config, send, available }: {
         : motionPowered ? 'Return to start to get ready to teach.'
         : 'Position the arm by hand, or turn torque on for an automatic return.'
       extra = <>
-        {state?.notice.match(/^(Episode discarded|Start pose saved|Saved start deleted)\./) && <p className="hint" role="status">{state.notice}</p>}
+        {state?.notice.match(/^(Episode discarded\.|Start pose saved\.|Saved start deleted\.|Practice ended\.|At the saved rest position\.)/) && <p className="hint" role="status">{state.notice}</p>}
         <div className="start-picker">
           <button className={`button ${hasStart ? '' : 'primary'}`} disabled={!available} onClick={() => { setPoseLabel(''); send('capture_start') }}><Crosshair size={15} /> Use current position</button>
           <label className="field">Saved start poses
@@ -257,6 +262,18 @@ function Workflow({ state, config, send, available }: {
       </>
       break
     }
+    case 'practice':
+      title = 'Practice controls'
+      detail = 'Try moving the arm before teaching. Nothing is recorded.'
+      controls = <>
+        <button className="button primary" disabled={!available} onClick={() => send('finish_practice')}><Check size={15} /> Done</button>
+        {state?.rest_target && <button className="button" disabled={!canReturn} onClick={park}><RotateCcw size={15} /> Return to rest</button>}
+      </>
+      extra = <>
+        <ManualControls send={send} enabled={available && !confirm} />
+        {!state?.rest_target && <p className="hint">To add a parking position, choose Done, then save the current position under Rest position.</p>}
+      </>
+      break
     case 'teaching':
       title = 'Teaching in progress'
       detail = `Guide the arm through the task. Hold it still when you stop. · ${elapsed(state?.elapsed ?? 0)} taught`
@@ -316,7 +333,7 @@ function Workflow({ state, config, send, available }: {
             </label>}
             <label className="manual-option">
               <input type="checkbox" checked={manualFinish} disabled={!available} onChange={event => setManualFinish(event.target.checked)} />
-              <span><strong>Keyboard finish</strong><small>Take over at the end of replay while recording continues.</small></span>
+              <span><strong>Manual finish</strong><small>Open manual controls automatically at the end of replay.</small></span>
             </label>
             {state?.grip?.saved && <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
           </div>
@@ -344,15 +361,18 @@ function Workflow({ state, config, send, available }: {
         </div>
         {state?.grip && (state.grip.enabled || phase === 'replay') &&
           <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
-        {phase === 'replay' && state?.manual_finish && <KeyboardLegend upcoming />}
+        {phase === 'replay' && <p className="hint">Taking over ends replay, not the recording.</p>}
       </>
-      if (phase === 'replay') controls = <button className="button primary" disabled={!available} onClick={() => send('stop_recording')}><Square size={14} /> Stop recording</button>
+      if (phase === 'replay') controls = <>
+        <button className="button primary" disabled={!available} onClick={() => send('take_over', { confirmed: true })}><Hand size={15} /> Take over</button>
+        <button className="button" disabled={!available} onClick={() => send('stop_recording')}><Square size={14} /> Stop recording</button>
+      </>
       break
     case 'manual':
-      title = 'Keyboard teleoperation'
-      detail = 'Ghost path complete. Take over with the keyboard while recording continues.'
-      controls = <button className="button primary" disabled={!available} onClick={() => send('stop_recording')}><Square size={14} /> Finish recording</button>
-      extra = <ManualControls send={send} />
+      title = 'Manual control · recording'
+      detail = state?.notice ?? 'Recording continues under manual control.'
+      controls = <button className="button primary" disabled={!available} onClick={() => send('finish_manual')}><Square size={14} /> Finish recording</button>
+      extra = <ManualControls send={send} enabled={available && !confirm} />
       break
     case 'processing':
     case 'saving':
@@ -430,7 +450,8 @@ function Workflow({ state, config, send, available }: {
         </div>
       </details>}
     </div>}
-    {(canDiscard || canManagePower) && <div className="workflow-secondary">
+    {(phase === 'ready' || canDiscard || canManagePower) && <div className="workflow-secondary">
+      {phase === 'ready' && <button className="text-button" disabled={!available} onClick={startPractice}><Hand size={14} /> Practice controls</button>}
       {canManagePower && <button className="text-button" disabled={!available} onClick={changePower}>
         {torqueOn ? <ZapOff size={14} /> : <Zap size={14} />}{torqueOn ? phase === 'ready' ? 'Release arm to position' : 'Turn torque off' : 'Turn torque on'}
       </button>}

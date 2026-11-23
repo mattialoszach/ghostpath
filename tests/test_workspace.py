@@ -303,10 +303,89 @@ def test_continue_appends_to_the_same_path_at_the_selected_start(tmp_path):
         session._close_devices()
 
 
-@pytest.mark.parametrize("lose_arm_in_review", [False, True])
+def test_manual_practice_can_hold_or_park_without_saving_poses_or_data(tmp_path):
+    app = create_app(tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        with client.websocket_connect("ws://localhost/ws") as ws:
+            ws.send_json({"action": "connect", "config": {"cameras": []}})
+            wait_for(ws, lambda state: state["phase"] == "ready")
+            ws.send_json({"action": "capture_rest"})
+            rest = wait_for(ws, lambda state: state["rest_target"])["rest_target"]
+            rest_files = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+            ws.send_json({"action": "practice"})
+            practice = wait_for(ws, lambda state: state["phase"] == "practice")
+            assert practice["torque"] == "on" and not practice["recording"]
+            ws.send_json({"action": "jog", "axes": {"shoulder_pan": 1}})
+            moved = wait_for(ws, lambda state: state["pose"]["shoulder_pan"] > 0.15)
+            ws.send_json({"action": "finish_practice"})
+            held = wait_for(ws, lambda state: state["phase"] == "ready")
+            assert held["pose"]["shoulder_pan"] >= moved["pose"]["shoulder_pan"]
+            assert held["start_pose"] is None
+            ws.send_json({"action": "practice"})
+            wait_for(ws, lambda state: state["phase"] == "practice")
+            ws.send_json({"action": "park"})
+            wait_for(ws, lambda state: state["phase"] == "returning")
+            parked = wait_for(ws, lambda state: state["phase"] == "ready" and state["at_rest"])
+            assert parked["pose"]["shoulder_pan"] == pytest.approx(rest["shoulder_pan"], abs=0.15)
+            assert parked["frames"] == 0
+            ws.send_json({"action": "practice"})
+            wait_for(ws, lambda state: state["phase"] == "practice")
+            ws.send_json({"action": "stop"})
+            stopped = wait_for(ws, lambda state: state["phase"] == "fault")
+            assert stopped["fault"] == "Stopped by the operator."
+    assert rest_files == {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    assert rest_files
+    assert not (tmp_path / "datasets").exists()
+
+
+@pytest.mark.parametrize("release", ["normal", "blur", "stale"])
+def test_manual_jog_eases_normal_release_but_holds_on_blur_or_stale_input(tmp_path, release):
+    session = Session(tmp_path)
+    session.config = Configuration(cameras=[])
+    session._command(Command(action="connect"))
+    try:
+        session._command(Command(action="practice"))
+        joint = "shoulder_pan"
+        session._command(Command(action="jog", axes={joint: 1}))
+        period = 1 / CONTROL.fps
+
+        def tick(now):
+            session.heartbeat()
+            session._manual_tick(now, period, now, (now, now))
+            session.pose = session.manual_goal.copy()
+
+        for step in range(1, 10):
+            tick(session.jog_at + step * period)
+        before = session.manual_goal[joint]
+        speed = session.motion.velocity[joint]
+        if release == "stale":
+            tick(session.jog_at + 0.26)
+        else:
+            session._command(Command(action="jog", immediate_stop=release == "blur"))
+            started = session.jog_at
+            tick(started + period)
+            if release == "normal":
+                assert session.manual_goal[joint] > before
+                for step in range(2, 5):
+                    tick(started + step * period)
+                assert 0 < session.motion.velocity[joint] < speed
+                for step in range(5, 26):
+                    tick(started + step * period)
+                assert session.manual_goal[joint] - before < 1.5
+            else:
+                assert session.manual_goal[joint] == before
+        assert session.motion.stopped
+        assert not session.jog_active and not session.axes
+    finally:
+        session._close_devices()
+
+
+@pytest.mark.parametrize("handoff_kind", ["automatic", "fault_in_review", "takeover"])
 def test_replay_records_initial_alignment_and_manual_handoff(
-    tmp_path, monkeypatch, lose_arm_in_review
+    tmp_path, monkeypatch, handoff_kind
 ):
+    early = handoff_kind == "takeover"
+    lose_arm_in_review = handoff_kind == "fault_in_review"
     dataset_module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
     rest = SimulatedFollower(CONTROL).read()
     save_id = "20261120T000000-abcdef12"
@@ -344,25 +423,36 @@ def test_replay_records_initial_alignment_and_manual_handoff(
             ready = wait_for(ws, lambda s: s["phase"] == "reset" and s["at_start"])
             assert ready["path"]["teaching_duration"] == 0.65
             assert ready["path"]["replay_profile"] == "fast"
-            ws.send_json({"action": "replay", "manual_finish": True})
+            ws.send_json({"action": "replay", "manual_finish": not early})
             aligning = wait_for(ws, lambda s: s["replay_stage"] == "aligning" and s["frames"] > 0)
             assert aligning["recording"]
             assert aligning["progress"] == 0
             assert app.state.session.robot.settings == FAST_REPLAY
+            if early:
+                wait_for(ws, lambda s: s["replay_stage"] == "path" and 0.15 < s["progress"] < 0.8)
+                ws.send_json({"action": "take_over", "confirmed": True})
             handoff = wait_for(ws, lambda s: s["phase"] == "manual")
             assert handoff["recording"]
-            assert handoff["progress"] == pytest.approx(1)
+            if early:
+                assert handoff["progress"] < 1
+            else:
+                assert handoff["progress"] == pytest.approx(1)
             assert app.state.session.robot.settings == CONTROL
             ws.send_json({"action": "jog", "axes": {"gripper": -1}})
             wait_for(ws, lambda s: s["phase"] == "manual" and s["pose"]["gripper"] < 64.9)
             ws.send_json({"action": "jog", "axes": {}})
-            ws.send_json({"action": "stop_recording"})
+            ws.send_json({"action": "finish_manual"})
             review = wait_for(ws, lambda s: s["phase"] == "review")
             quality = review["quality"]
             timing = quality["replay_timing"]
-            assert timing["alignment_seconds"] > 0
-            assert timing["motion_seconds"] == pytest.approx(ready["path"]["duration"], abs=0.15)
-            assert timing["settle_seconds"] >= 0.55
+            if early:
+                assert timing is None
+            else:
+                assert timing["alignment_seconds"] > 0
+                assert timing["motion_seconds"] == pytest.approx(
+                    ready["path"]["duration"], abs=0.15
+                )
+                assert timing["settle_seconds"] >= 0.55
             assert quality["max_arm_path_error_deg"] is not None
             if lose_arm_in_review:
                 def unavailable():
@@ -386,8 +476,10 @@ def test_replay_records_initial_alignment_and_manual_handoff(
     dataset = dataset_module.LeRobotDataset(
         "local/block-placement", root=root, video_backend="pyav"
     )
-    assert not dataset[0]["ghostpath.manual"].item()
-    assert dataset[dataset.num_frames - 1]["ghostpath.manual"].item()
+    manual = [frame["ghostpath.manual"].item() for frame in dataset]
+    assert manual == sorted(manual) and not manual[0] and manual[-1]
+    indices = [frame["ghostpath.sample_index"].item() for frame in dataset]
+    assert indices == list(range(len(dataset)))
     assert dataset[0]["observation.state"][3].item() == pytest.approx(0, abs=0.05)
     manifest = json.loads((root / "ghostpath.json").read_text())
     entries = manifest["episodes"]
@@ -395,13 +487,23 @@ def test_replay_records_initial_alignment_and_manual_handoff(
     assert manifest["policy_io"]["robot"]["position_limits"]["gripper"] == [0, 100]
     assert entries[0]["poses"] == {"task_start": ready["reset_target"], "rest": parking}
     assert entries[0]["poses"]["task_start"]["wrist_flex"] == pytest.approx(1.2)
-    assert entries[0]["manual_finish"]
+    assert entries[0]["manual_finish"] is not early
     assert entries[0]["replay_timing"] == timing
     control = json.loads((root / entries[0]["control_trace"]).read_text())
     ticks = control["ticks"]
     assert control["nominal_hz"] == CONTROL.fps
     assert len(ticks) > dataset.num_frames
-    assert {tick["stage"] for tick in ticks} >= {"path", "settling", "manual"}
+    if early:
+        takeover = next(i for i, tick in enumerate(ticks) if tick["stage"] == "manual")
+        assert ticks[takeover - 1]["stage"] == "path"
+        assert all(tick["stage"] == "manual" for tick in ticks[takeover:])
+        assert ticks[takeover]["action"] == ticks[takeover]["state"]
+        assert entries[0]["manual_takeover_seconds"] == pytest.approx(
+            ticks[takeover]["timestamp"], abs=0.001
+        )
+    else:
+        assert "manual_takeover_seconds" not in entries[0]
+        assert {tick["stage"] for tick in ticks} >= {"path", "settling", "manual"}
     assert all(
         tick["encoder_read"][0] <= tick["timestamp"] <= tick["encoder_read"][1] for tick in ticks
     )

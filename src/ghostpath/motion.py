@@ -149,7 +149,7 @@ class Motion:
 
     def step(self, axes: Pose, dt: float, measured: Pose, precision: bool = False) -> Pose:
         if not math.isfinite(dt) or dt <= 0 or dt > self.settings.watchdog:
-            raise SafetyFault("Control loop missed its deadline; release Space and restart")
+            raise SafetyFault("Control loop missed its deadline; release the controls and restart")
         self.check_measurement(measured)
         # Account for ordinary scheduling jitter without replaying a long stall.
         dt = min(dt, 2 / self.settings.fps)

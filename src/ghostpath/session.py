@@ -60,9 +60,12 @@ FAST_REPLAY = replace(
     CONTROL, speed=120, acceleration=360, gripper_speed=100, gripper_acceleration=400
 )
 REPLAY_SETTINGS = {ReplayProfile.STANDARD: CONTROL, ReplayProfile.FAST: FAST_REPLAY}
-ACTIVE = {Phase.TEACHING, Phase.RESET_RELEASED, Phase.RETURNING, Phase.REPLAY, Phase.MANUAL}
+JOG_PHASES = {Phase.PRACTICE, Phase.MANUAL}
+ACTIVE = {Phase.TEACHING, Phase.RESET_RELEASED, Phase.RETURNING, Phase.REPLAY} | JOG_PHASES
 IDLE = {Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.REVIEW, Phase.NEXT, Phase.FINISHED}
 REST_PHASES = (Phase.READY, Phase.RESET, Phase.NEXT, Phase.FINISHED)
+JOG_LEASE_SECONDS = 0.25
+JOG_BRAKE_SECONDS = 0.40
 
 
 class WorkflowError(ValueError):
@@ -109,6 +112,7 @@ class Session:
         self.axes: Pose = {}
         self.jog_at = 0.0
         self.jog_active = False
+        self.jog_hard_stop = False
         self.record_origin: float | None = None
         self.record_index = 0
         self.record_candidate: Record | None = None
@@ -118,6 +122,8 @@ class Session:
         self.replay_timing: dict[str, float] | None = None
         self.manual_started = 0.0
         self.manual_finish = False
+        self.takeover_requested = False
+        self.manual_takeover_seconds: float | None = None
         self.manual_goal: Pose | None = None
         self.manual_trim: LoadTrim | None = None
         self.heartbeat_at = time.monotonic()
@@ -220,6 +226,8 @@ class Session:
 
     def _command(self, cmd: Command):
         action = cmd.action
+        if action == "jog" and not cmd.axes and self.phase not in JOG_PHASES:
+            return
         if self.fault and self.phase != Phase.FAULT and action not in {
             "save",
             "discard",
@@ -394,16 +402,42 @@ class Session:
             self.notice = (
                 "Starting recording. The arm holds until the cameras and writer are ready."
             )
+        elif action == "practice":
+            self._require(Phase.READY)
+            self._confirmed(cmd, "Clear the arm's workspace before starting manual practice.")
+            self.power.refresh()
+            if self.power.state == "off":
+                self.power.engage(self._assert_controller)
+            self._verify_holding()
+            self.robot.hold()
+            latched = self._powered_start()
+            self._start_manual(time.monotonic(), latched, practice=True)
+        elif action == "finish_practice":
+            self._require(Phase.PRACTICE)
+            self.robot.hold()
+            self._clear_jog()
+            self.phase = Phase.READY
+            self.notice = "Practice ended. The arm is holding its current position."
+        elif action == "take_over":
+            self._require(Phase.REPLAY)
+            self._confirmed(cmd, "Confirm manual takeover.")
+            self.takeover_requested = True
         elif action == "jog":
-            self._require(Phase.MANUAL)
+            self._require(*JOG_PHASES)
             if any(j not in JOINTS or abs(v) > 1 for j, v in cmd.axes.items()):
                 raise WorkflowError("Invalid manual joint input.")
-            self.axes = cmd.axes
-            self.jog_at = time.monotonic()
+            if cmd.immediate_stop and any(cmd.axes.values()):
+                raise WorkflowError("An immediate stop cannot include movement.")
+            axes = {joint: value for joint, value in cmd.axes.items() if value}
+            if axes or self.axes:
+                self.jog_at = time.monotonic()
+            self.axes = axes
+            self.jog_hard_stop |= cmd.immediate_stop
         elif action in {"finish_manual", "stop_recording"}:
             phases = (Phase.MANUAL,) if action == "finish_manual" else (Phase.REPLAY, Phase.MANUAL)
             self._require(*phases)
             self.robot.hold()
+            self._clear_jog()
             self.robot.stream_profile(CONTROL)
             if self.record_index < 3:
                 self._begin_operation("stop_empty", self.datasets.discard())
@@ -418,6 +452,7 @@ class Session:
                     self.path_id,
                     self.config.mode,
                     manual_finish=self.manual_finish,
+                    manual_takeover_seconds=self.manual_takeover_seconds,
                     firm_carry_grip=bool(self.replay_firm_carries),
                     start_pose=self._reset_goal(),
                     rest_pose=self._park_goal(),
@@ -700,7 +735,9 @@ class Session:
         return latched
 
     def _auto_reset(self, cmd: Command, *, reverse: bool = False, park: bool = False):
-        phases = REST_PHASES if park else (Phase.READY, Phase.TEACH_PAUSED, Phase.RESET)
+        phases = (*REST_PHASES, Phase.PRACTICE) if park else (
+            Phase.READY, Phase.TEACH_PAUSED, Phase.RESET
+        )
         self._require(*phases)
         goal = self._park_goal() if park else self._reset_goal()
         if goal is None:
@@ -725,11 +762,16 @@ class Session:
         else:
             self._confirmed(cmd, "Empty the gripper and clear the entire return path.")
         self.motion.check_pose(goal)
+        if self.phase == Phase.PRACTICE:
+            self.robot.hold()
+            self._clear_jog()
         latched = self._powered_start()
         self.scene_reversed = False
         if self.phase == Phase.TEACH_PAUSED and self.path is None:
             raise WorkflowError("Continue teaching until the path is ready to reset.")
-        self.return_phase = Phase.RESET if self.phase == Phase.TEACH_PAUSED else self.phase
+        self.return_phase = {
+            Phase.TEACH_PAUSED: Phase.RESET, Phase.PRACTICE: Phase.READY,
+        }.get(self.phase, self.phase)
         if reverse:
             at_endpoint = self._near(self.path.end)
             if not at_endpoint and not (
@@ -1106,6 +1148,8 @@ class Session:
             self.record_index = 0
             self.record_candidate = None
             self.control_trace = []
+            self.takeover_requested = False
+            self.manual_takeover_seconds = None
             self.last_recorded_at = float("-inf")
             self.stopped_early = False
             self.scene_reversed = False
@@ -1181,6 +1225,10 @@ class Session:
         if now - self.last_torque_check > 0.27:
             self.last_torque_check = now
             self.power.refresh(active=active)
+        if self.phase in {Phase.REPLAY, Phase.RETURNING} | JOG_PHASES:
+            if now - self.last_goal_check > 1:
+                self.robot.verify_goals()
+                self.last_goal_check = now
         if self.phase == Phase.TEACHING:
             self.teacher.append(stamp, self.pose)
             self.elapsed = self.teacher.samples[-1].t
@@ -1188,10 +1236,23 @@ class Session:
                 self.demo is not None and now - self.demo >= 4.35
             ):
                 self._stop_teaching()
+        elif self.phase == Phase.REPLAY and self.takeover_requested:
+            if isinstance(self.player, ServoPlayer):
+                self.player.check_issued(self.pose)
+            else:
+                self.player.motion.check_tracking(self.pose)
+            self._assert_controller()
+            send_started = time.monotonic()
+            sent = self.robot.send(self.motion.clamp(self.pose), force=True)
+            command_send = (send_started, time.monotonic())
+            origin = self.record_origin if self.record_origin is not None else stamp
+            self.manual_takeover_seconds = round(stamp - origin, 3)
+            self._start_manual(stamp, sent)
+            self._record(
+                stamp, sent, manual=True, reference=self.motion.target,
+                encoder_read=encoder_read, command_send=command_send, stage="manual",
+            )
         elif self.phase in {Phase.REPLAY, Phase.RETURNING}:
-            if now - self.last_goal_check > 1:
-                self.robot.verify_goals()
-                self.last_goal_check = now
             assist = self.grip_assist
             if assist:
                 assist.advance(stamp, dt, self.player.cursor)
@@ -1244,7 +1305,7 @@ class Session:
                 self.return_phase = None
                 self.scene_reversed = self.reset_action == "reverse"
                 if self.reset_action == "park":
-                    self.notice = "At rest. Boomerang can reset a reversible scene from here."
+                    self.notice = "At the saved rest position."
                 elif self.scene_reversed:
                     self.robot.stream_profile(CONTROL)
                     self.notice = "Reverse motion complete. Verify the scene before recording."
@@ -1255,42 +1316,63 @@ class Session:
                         if self.path
                         else "Start pose verified. Ready to teach."
                     )
-        elif self.phase == Phase.MANUAL:
+        elif self.phase in JOG_PHASES:
             self._manual_tick(now, dt, stamp, encoder_read)
 
-    def _start_manual(self, stamp: float, sent: Pose):
+    def _clear_jog(self):
+        self.axes = {}
+        self.jog_at = 0.0
+        self.jog_active = self.jog_hard_stop = False
+
+    def _start_manual(self, stamp: float, sent: Pose, *, practice: bool = False):
         self.robot.stream_profile(CONTROL)
         self._assert_controller()
-        self.phase = Phase.MANUAL
+        self.phase = Phase.PRACTICE if practice else Phase.MANUAL
+        self.player = None
+        self.grip_assist = None
+        self.takeover_requested = False
         self.manual_started = stamp
         nominal = self.motion.hold(self._servo_origin(sent))
         self.manual_trim = LoadTrim(nominal, sent) if isinstance(self.robot, Follower) else None
         self.manual_goal = sent
-        self.axes, self.jog_active = {}, False
-        self.jog_at = 0.0
-        self.notice = "Ghost path complete. Keyboard control is ready. Recording continues."
+        self._clear_jog()
+        if practice:
+            self.notice = ""
+        elif self.manual_takeover_seconds is not None:
+            self.notice = "Replay stopped. Manual control is active and recording continues."
+        else:
+            self.notice = "Replay complete. Manual control is active and recording continues."
 
     def _manual_tick(self, now: float, dt: float, stamp: float, encoder_read: tuple[float, float]):
         self.motion.check_tracking(self.pose)
-        enabled = any(self.axes.values()) and now - self.jog_at < 0.25
         self._assert_controller()
+        enabled = bool(self.axes)
+        timeout = JOG_LEASE_SECONDS if enabled else JOG_BRAKE_SECONDS
+        immediate = self.jog_hard_stop
+        hard_stop = immediate or now - self.jog_at >= timeout
         command_send = None
-        reference = None
+        reference = self.motion.target
         if enabled or self.jog_active:
             target = (
-                self.motion.step(self.axes, max(0.0001, dt), self.pose, precision=True)
-                if enabled
-                else self.motion.hold(self.pose)
+                self.motion.hold(self.pose) if hard_stop
+                else self.motion.step(self.axes, max(0.0001, dt), self.pose, precision=True)
             )
             reference = target
-            if self.manual_trim:
+            if self.manual_trim and not hard_stop:
                 if enabled:
                     self.manual_trim.update(min(dt, 1 / CONTROL.fps), target, self.pose)
                 target = self.manual_trim.goal(target, self.motion)
             send_started = time.monotonic()
             self.manual_goal = self.robot.send(target)
             command_send = (send_started, time.monotonic())
-        self.jog_active = enabled
+            if hard_stop and self.manual_trim:
+                self.manual_trim = LoadTrim(reference, self.manual_goal)
+        if hard_stop:
+            self._clear_jog()
+        else:
+            self.jog_active = enabled or not self.motion.stopped
+        if self.phase == Phase.PRACTICE:
+            return
         self._record(
             stamp, self.manual_goal, manual=True, reference=reference,
             encoder_read=encoder_read, command_send=command_send, stage="manual",
@@ -1370,6 +1452,8 @@ class Session:
         self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist = None
+        self.takeover_requested = False
+        self._clear_jog()
         if self.robot:
             try:
                 self.power.stop()

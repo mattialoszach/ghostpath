@@ -2,7 +2,7 @@ import {
   Activity, Camera, ChevronDown, Cpu, Crosshair, Eye, EyeOff, Film, FolderOpen,
   Monitor, Plus, Radio, ScanLine, SlidersHorizontal, Trash2, Video,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { jogKeys, keyLabel } from './controls'
 import { camera, elapsed, humanize, jointLabels, joints, replayProfileLabels } from './types'
 import type { CameraSpec, Config, Joint, Send, State } from './types'
@@ -377,59 +377,23 @@ export function SavedPaths({ state, send, available }: { state: State, send: Sen
 interface JogInput {
   joint: Joint
   value: -1 | 1
+  owner: string | number
 }
 
-interface JogButtons {
-  active: Partial<Record<Joint, number>>
-  start: (input: JogInput) => void
-  release: () => void
-}
+const directionCodes = new Set<string>(Object.values(jogKeys).flat().map(key => key.code))
 
-export function KeyboardLegend({ upcoming = false, buttons }: { upcoming?: boolean; buttons?: JogButtons }) {
-  return <div className="keyboard-legend" aria-label="Keyboard shortcuts">
-    <p>{upcoming && 'Controls unlock after replay. '}Hold <kbd>Space</kbd> + a shortcut to move. Release to hold position.</p>
-    <dl>{joints.map(joint => <div key={joint}>
-      <dt>{jointLabels[joint]}</dt>
-      {jogKeys[joint].map(({ code, label, value }) => <dd key={code}>
-        {buttons ? <button type="button" className={`jog-shortcut ${buttons.active[joint] === value ? 'held' : ''}`}
-          aria-label={`${jointLabels[joint]} ${label.toLowerCase()}`}
-          onPointerDown={event => {
-            if (event.button !== 0) return
-            event.preventDefault()
-            event.currentTarget.setPointerCapture(event.pointerId)
-            buttons.start({ joint, value })
-          }}
-          onPointerUp={buttons.release} onPointerCancel={buttons.release} onLostPointerCapture={buttons.release}
-          onKeyDown={event => {
-            if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) {
-              event.preventDefault()
-              buttons.start({ joint, value })
-            }
-          }}
-          onKeyUp={event => {
-            if (event.key === ' ' || event.key === 'Enter') buttons.release()
-          }}
-          onBlur={buttons.release}
-        ><kbd>{keyLabel(code)}</kbd><span>{label}</span></button>
-        : <span className="jog-shortcut"><kbd>{keyLabel(code)}</kbd><span>{label}</span></span>}
-      </dd>)}
-    </div>)}</dl>
-    {buttons && <small>Hold an on-screen button to jog. <kbd>Esc</kbd> stops motion.</small>}
-  </div>
-}
-
-export function ManualControls({ send }: { send: Send }) {
+export function ManualControls({ send, enabled }: { send: Send; enabled: boolean }) {
   const panel = useRef<HTMLDivElement>(null)
   const input = useRef<JogInput | null>(null)
   const pressed = useRef(new Set<string>())
   const active = useRef<Partial<Record<Joint, number>>>({})
   const [highlight, setHighlight] = useState(active.current)
 
-  const transmit = () => {
+  const transmit = useCallback(() => {
     const current = input.current
     const keys = pressed.current
     const axes: Partial<Record<Joint, number>> = current ? { [current.joint]: current.value } : {}
-    if (!current && keys.has('Space')) {
+    if (!current) {
       for (const joint of joints) {
         const direction = jogKeys[joint].reduce((sum, key) => sum + (keys.has(key.code) ? key.value : 0), 0)
         if (direction) axes[joint] = direction
@@ -438,64 +402,96 @@ export function ManualControls({ send }: { send: Send }) {
     active.current = axes
     setHighlight(axes)
     send('jog', { axes })
-  }
+  }, [send])
+
+  const stop = useCallback(() => {
+    input.current = null
+    pressed.current.clear()
+    active.current = {}
+    setHighlight(active.current)
+    send('jog', { axes: {}, immediate_stop: true })
+  }, [send])
 
   useEffect(() => {
+    if (!enabled) return
     panel.current?.focus({ preventScroll: true })
-    const keys = pressed.current
-    const keyCodes = new Set(['Space', ...Object.values(jogKeys).flat().map(key => key.code)])
     const tick = window.setInterval(() => {
-      if (input.current || keys.has('Space')) send('jog', { axes: active.current })
+      if (Object.keys(active.current).length) send('jog', { axes: active.current })
     }, 80)
-    const release = () => {
-      input.current = null
-      keys.clear()
-      transmit()
-    }
-    const keyDown = (event: KeyboardEvent) => {
-      const target = event.target
-      if (!keyCodes.has(event.code) ||
-          target instanceof HTMLElement && target.closest('input, button, select, textarea, summary, a, [contenteditable]') ||
-          event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
-      if (event.code === 'Space' || keys.has('Space')) event.preventDefault()
-      if (!keys.has(event.code) && !event.repeat) {
-        keys.add(event.code)
-        if (keys.has('Space')) transmit()
-      }
-    }
-    const keyUp = (event: KeyboardEvent) => {
-      if (keys.delete(event.code) && (event.code === 'Space' || keys.has('Space'))) {
-        event.preventDefault()
-        transmit()
-      }
-    }
-    const visibility = () => { if (document.hidden) release() }
-    window.addEventListener('blur', release)
-    window.addEventListener('keydown', keyDown)
-    window.addEventListener('keyup', keyUp)
+    const visibility = () => { if (document.hidden) stop() }
+    window.addEventListener('blur', stop)
     document.addEventListener('visibilitychange', visibility)
     return () => {
       window.clearInterval(tick)
-      window.removeEventListener('blur', release)
-      window.removeEventListener('keydown', keyDown)
-      window.removeEventListener('keyup', keyUp)
+      window.removeEventListener('blur', stop)
       document.removeEventListener('visibilitychange', visibility)
+      stop()
     }
-  }, [send])
+  }, [enabled, send, stop])
 
   const start = (next: JogInput) => {
+    if (!enabled || input.current) return
     pressed.current.clear()
     input.current = next
     transmit()
   }
-  const release = () => {
-    if (!input.current) return
-    input.current = null
-    transmit()
+  const release = (owner: JogInput['owner'], immediate = false) => {
+    if (input.current?.owner !== owner) return
+    if (immediate) stop()
+    else {
+      input.current = null
+      transmit()
+    }
   }
 
-  return <div className="manual-controls" ref={panel} tabIndex={-1} aria-label="Manual controls">
-    <KeyboardLegend buttons={{ active: highlight, start, release }} />
+  return <div className="manual-controls keyboard-legend" role="group" ref={panel} tabIndex={enabled ? 0 : -1} aria-label="Manual controls"
+    onBlur={event => {
+      if (enabled && (event.target === event.currentTarget || !event.currentTarget.contains(event.relatedTarget))) stop()
+    }}
+    onKeyDown={event => {
+      if (!enabled || event.target !== event.currentTarget) return
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      if (event.code === 'Space') {
+        event.preventDefault()
+        return
+      }
+      if (!directionCodes.has(event.code)) return
+      event.preventDefault()
+      if (!input.current && !event.repeat && !pressed.current.has(event.code)) {
+        pressed.current.add(event.code)
+        transmit()
+      }
+    }}
+    onKeyUp={event => {
+      if (enabled && pressed.current.delete(event.code)) transmit()
+    }}>
+    <p>Hold a direction key or button to move. Release to ease to a stop.</p>
+    <dl>{joints.map(joint => <div key={joint}>
+      <dt>{jointLabels[joint]}</dt>
+      {jogKeys[joint].map(({ code, label, value }) => <dd key={code}>
+        <button type="button" disabled={!enabled} className={`jog-shortcut ${highlight[joint] === value ? 'held' : ''}`}
+          aria-label={`${jointLabels[joint]} ${label.toLowerCase()}`}
+          onPointerDown={event => {
+            if (!enabled || event.button !== 0 || input.current) return
+            event.preventDefault()
+            panel.current?.focus({ preventScroll: true })
+            event.currentTarget.setPointerCapture(event.pointerId)
+            start({ joint, value, owner: event.pointerId })
+          }}
+          onPointerUp={event => release(event.pointerId)}
+          onPointerCancel={event => release(event.pointerId, true)}
+          onLostPointerCapture={event => release(event.pointerId, true)}
+          onKeyDown={event => {
+            if (event.code !== 'Space' && event.code !== 'Enter') return
+            event.preventDefault()
+            if (!event.repeat) start({ joint, value, owner: event.code })
+          }}
+          onKeyUp={event => release(event.code)}
+          onBlur={() => { if (typeof input.current?.owner === 'string') stop() }}
+        ><kbd>{keyLabel(code)}</kbd><span>{label}</span></button>
+      </dd>)}
+    </div>)}</dl>
+    <small>Focus this panel to use the shortcuts. <kbd>Esc</kbd> stops motion.</small>
   </div>
 }
 
