@@ -17,6 +17,14 @@ uv run --locked --extra hardware python -m ghostpath.camera_check 0 1 --seconds 
 
 This checks both streams at once and writes and reads back a temporary LeRobot episode using synthetic joint telemetry. It doesn't move the arm or add anything to your datasets. Omit `--dataset-fps` to check camera delivery alone. GhostPath uses native sizes and does not silently resize a different camera mode. On macOS the report uses AVFoundation presentation timestamps; they are mapped to the host clock but are not a physical exposure measurement.
 
+To compare pairing delays on the same two-camera trace:
+
+```sh
+uv run --locked --extra hardware python -m ghostpath.camera_check 0 1 --seconds 60 --dataset-fps 20 --compare --timing-trace /tmp/ghostpath-camera-timing.json
+```
+
+The trace contains sequence numbers, presentation, arrival, and availability times for every delivered frame, including warm-up, plus the nominal ticks and synthetic observation cutoffs. It contains no images. The comparison reports image age, camera skew, and missed rows for 105, 90, 75, and 60 ms targets and for newest-available causal matching (0 ms). Prefer the freshest policy that keeps all rows on repeated checks; `--buffer-ms` changes the temporary export only, so you can verify a candidate through the writer too.
+
 ## Collect an ACT baseline
 
 - Keep the same camera names, mounts, resolution, and lighting for the dataset. In the workspace view, check that the full pickup area and destination are visible; in the wrist view, check that the jaws and target are sharp through approach and release. If two identical blocks are visible, remove the distractor or make the task instruction and demonstrations unambiguous.
@@ -50,7 +58,7 @@ In review, scrub the camera previews and check **Capture and tracking details**.
 
 ## Read the export
 
-GhostPath uses the LeRobot v3.0 writer (Parquet, H.264 video, and metadata). Video encoding runs during capture; a save is rejected if the encoded frame count does not match the telemetry rows for every view. The `ghostpath.json` manifest links each accepted episode to its taught path and reports measured FPS at preparation, native modes, device IDs on macOS, and signed camera timing percentiles. By default raw teaching traces and saved poses stay in the local workspace; none of this is uploaded.
+GhostPath uses the LeRobot v3.0 writer (Parquet, H.264 video, and metadata). Video encoding runs during capture; a save is rejected if the encoded frame count does not match the telemetry rows for every view. The `ghostpath.json` manifest links each accepted episode to its taught path and reports native modes, device IDs on macOS, and camera timing. **Capture and tracking details** in review compares measured camera FPS with dataset FPS and shows image age at encoder read end, delivery time from the frame timestamp to GhostPath availability, and time spent waiting after delivery. Saved episodes also keep the full control trace for comparing the measured position, reference, command, and replay rate during tracking excursions. By default raw teaching traces and saved poses stay in the local workspace; none of this is uploaded.
 
 ```python
 import json
@@ -95,7 +103,7 @@ Use the same local root and repo ID in your LeRobot training configuration, and 
 
 Joint order is `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`. LeRobot feature names use the `.pos` suffix. The arm uses degrees and the gripper uses percent of calibrated travel. The policy needs a matching bounded servo-goal interface at the export cadence; do not send `action` back through a controller that adds the same lookahead and trim again.
 
-GhostPath selects unused frames that were available by the end of the encoder read. On macOS it targets frames 105 ms behind the nominal dataset grid to absorb uneven USB delivery and encoder sampling jitter; reproduce this input selection at deployment. This intentionally trades some visual freshness for steadier sampling. A simultaneous flash visible to both cameras, and a visible arm marker in a clear, supervised test, are still needed to calibrate physical camera-to-camera and camera-to-encoder timing.
+GhostPath selects unused frames that were available by the end of the encoder read. On macOS it targets frames 75 ms behind the nominal dataset tick to account for uneven USB delivery and encoder sampling jitter. At deployment, reproduce the dataset's `observation_policy.avfoundation_buffer_seconds` using `Cameras.frames`: pass the encoder read end as `cutoff`, the nominal policy tick as `scheduled`, and the last accepted sequence per view as `after`. Use the same camera modes and dataset cadence, and do not silently pool takes with different buffer settings for a timing-sensitive baseline. A simultaneous flash visible to both cameras, and a visible arm marker in a clear, supervised test, are still needed to calibrate physical camera-to-camera and camera-to-encoder timing.
 
 An isolated missing sample can be skipped, while repeated gaps abort the take. `discontinuities` in the manifest contains the exported frame indices where a new segment begins. Filter those episodes out as above, or use a loader that refuses observation and action windows spanning two `ghostpath.segment_index` values. Stock LeRobot uses the constant-FPS timeline, not these segment markers. Older version 1 manifests use host camera arrival timestamps and may contain frames delivered after the robot sample; do not silently mix the two timing conventions.
 

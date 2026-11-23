@@ -3,16 +3,101 @@
 import argparse
 import json
 import time
+from collections import deque
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from .cameras import Cameras, source_index
+from .cameras import (
+    AVFOUNDATION_BUFFER,
+    FRAME_HISTORY_SIZE,
+    Cameras,
+    CameraTiming,
+    camera_candidates,
+    latest_match,
+    pairing_tolerance,
+    source_index,
+    timing_stats,
+)
 from .dataset import Datasets, Record, load_dataset_backend
 from .models import CameraSpec, Configuration
 from .motion import JOINTS
+
+BUFFER_OPTIONS_MS = (105, 90, 75, 60, 0)
+
+
+def compare_pairing(
+    frames: dict[str, list[CameraTiming]], ticks: list[tuple[float, float]],
+    buffered: set[str], tolerance: float,
+) -> list[dict]:
+    """Replay (scheduled tick, encoder cutoff) pairs on a common delivery trace."""
+    pending = {name: deque(stream) for name, stream in frames.items()}
+    histories = {name: deque(maxlen=FRAME_HISTORY_SIZE) for name in frames}
+    used = {buffer: dict.fromkeys(frames, -1) for buffer in BUFFER_OPTIONS_MS}
+    ages = {buffer: {name: [] for name in frames} for buffer in BUFFER_OPTIONS_MS}
+    skews = {buffer: [] for buffer in BUFFER_OPTIONS_MS}
+    for scheduled, cutoff in ticks:
+        for name, stream in pending.items():
+            while stream and stream[0].available <= cutoff:
+                histories[name].append(stream.popleft())
+        for buffer in BUFFER_OPTIONS_MS:
+            groups = [
+                camera_candidates(
+                    history, cutoff, used[buffer][name], scheduled,
+                    buffer / 1000 if name in buffered else 0,
+                )
+                for name, history in histories.items()
+            ]
+            if match := latest_match(groups, tolerance):
+                for name, frame in zip(frames, match, strict=True):
+                    used[buffer][name] = frame.sequence
+                    ages[buffer][name].append(cutoff - frame.timestamp)
+                stamps = [frame.timestamp for frame in match]
+                skews[buffer].append(max(stamps) - min(stamps))
+    return [
+        {
+            "buffer_ms": buffer,
+            "matched_rows": len(skews[buffer]),
+            "missed_rows": len(ticks) - len(skews[buffer]),
+            "image_age_ms": {
+                name: timing_stats(values) for name, values in ages[buffer].items() if values
+            },
+            "camera_skew_ms": timing_stats(skews[buffer]) if skews[buffer] else None,
+        }
+        for buffer in BUFFER_OPTIONS_MS
+    ]
+
+
+def _write_trace(path, start, finish, statuses, frames, ticks, tolerance):
+    with path.open("x") as stream:
+        json.dump(
+            {
+                "clock": "seconds_relative_to_measurement_start",
+                "measurement_seconds": finish - start,
+                "pairing_tolerance_seconds": tolerance,
+                "cameras": statuses,
+                "frames": {
+                    name: [
+                        {
+                            "sequence": frame.sequence,
+                            "timestamp": frame.timestamp - start,
+                            "arrival": frame.arrived - start,
+                            "available": frame.available - start,
+                        }
+                        for frame in samples
+                    ]
+                    for name, samples in frames.items()
+                },
+                "ticks": [
+                    {"scheduled": scheduled - start, "cutoff": cutoff - start}
+                    for scheduled, cutoff in ticks
+                ],
+            },
+            stream,
+        )
+        stream.write("\n")
 
 
 def _check_export(writer: Datasets, expected: int) -> dict:
@@ -61,9 +146,19 @@ def main():
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--seconds", type=int, default=20)
     parser.add_argument("--dataset-fps", type=int, help="Also verify a temporary LeRobot export")
+    parser.add_argument("--compare", action="store_true", help="Compare causal pairing policies")
+    parser.add_argument("--timing-trace", type=Path, help="Save timing metadata without images")
+    parser.add_argument(
+        "--buffer-ms", type=int, choices=BUFFER_OPTIONS_MS,
+        help="Override the macOS buffer for the temporary export",
+    )
     args = parser.parse_args()
     if args.seconds < 2:
         parser.error("Measure for at least two seconds.")
+    if args.dataset_fps is None and (args.compare or args.buffer_ms is not None):
+        parser.error("--compare and --buffer-ms require --dataset-fps.")
+    if args.timing_trace and args.timing_trace.exists():
+        parser.error("Choose a new file for --timing-trace.")
     try:
         specs = [
             CameraSpec(
@@ -85,8 +180,15 @@ def main():
     if len({spec.source for spec in specs}) != len(specs):
         parser.error("Choose distinct sources.")
 
-    cameras = Cameras(specs, simulation=False)
-    frames: dict[str, dict[int, tuple[float, float, float]]] = {spec.name: {} for spec in specs}
+    frames: dict[str, list[CameraTiming]] = {spec.name: [] for spec in specs}
+    buffer = AVFOUNDATION_BUFFER if args.buffer_ms is None else args.buffer_ms / 1000
+    cameras = Cameras(
+        specs, simulation=False, on_frame=lambda name, frame: frames[name].append(frame),
+        avfoundation_buffer=buffer,
+    )
+    ticks: list[tuple[float, float]] = []
+    export_error = None
+    result = None
     with ExitStack() as cleanup:
         writer = None
         if config:
@@ -114,28 +216,50 @@ def main():
         while True:
             now = time.monotonic()
             if writer and rows < expected and now >= start + rows * period:
-                writer.offer(Record(now, state, state, False))
+                ticks.append(((ticks[0][1] if ticks else now) + rows * period, now))
+                if export_error is None:
+                    try:
+                        writer.offer(Record(now, state, state, False))
+                    except RuntimeError as exc:
+                        export_error = str(exc)
                 rows += 1
-            for name, camera in cameras.captures.items():
-                with camera.condition:
-                    frames[name].update(
-                        (frame.sequence, (frame.timestamp, frame.arrived, frame.available))
-                        for frame in camera.history
-                        if start <= frame.available < finish
-                    )
             remaining = finish - time.monotonic()
             if remaining <= 0:
                 break
             next_row = start + rows * period - time.monotonic() if rows < expected else remaining
             time.sleep(max(0, min(0.05, remaining, next_row)))
         statuses = cameras.status()
-        result = _check_export(writer, expected) if writer else None
+        if writer and export_error is None:
+            try:
+                result = _check_export(writer, expected)
+            except (RuntimeError, ValueError) as exc:
+                export_error = str(exc)
 
-    for name, samples in frames.items():
+    tolerance = pairing_tolerance(specs)
+    frames = {
+        name: [frame for frame in stream if frame.available < finish]
+        for name, stream in frames.items()
+    }
+    if args.timing_trace:
+        _write_trace(args.timing_trace, start, finish, statuses, frames, ticks, tolerance)
+    if args.compare:
+        buffered = {
+            name for name, status in statuses.items()
+            if (status["mode"] or {}).get("timestamp_source") == "avfoundation_pts"
+        }
+        comparison = compare_pairing(frames, ticks, buffered, tolerance)
+        print(json.dumps({"pairing_comparison": comparison}))
+    delivered = {
+        name: [frame for frame in stream if frame.available >= start]
+        for name, stream in frames.items()
+    }
+    for name, samples in delivered.items():
         status = statuses[name]
         report = {"camera": name, **status, "delivered_frames": len(samples)}
         if len(samples) >= 2:
-            stamps, arrivals, available = np.array(list(samples.values())).T
+            stamps, arrivals, available = np.array([
+                (frame.timestamp, frame.arrived, frame.available) for frame in samples
+            ]).T
             gaps = np.diff(stamps)
             report.update(
                 fps=round(len(samples) / args.seconds, 2),
@@ -153,8 +277,10 @@ def main():
         print(json.dumps(report))
     if result:
         print(json.dumps({"temporary_export": result}))
+    if export_error is not None:
+        raise SystemExit(export_error)
     if any(not status["ready"] for status in statuses.values()) or any(
-        len(samples) < args.seconds * args.fps * 0.95 for samples in frames.values()
+        len(samples) < args.seconds * args.fps * 0.95 for samples in delivered.values()
     ):
         raise SystemExit("At least one camera fell below 95% of the requested FPS.")
 

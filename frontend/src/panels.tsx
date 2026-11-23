@@ -350,12 +350,11 @@ export function ReviewMetrics({ state }: { state: State }) {
           </>}
           <div><span>Max frame gap</span><strong>{quality.max_gap_ms} ms</strong></div>
           {cameraCount > 1 && <div><span>Max camera-to-camera skew</span><strong>{quality.camera_skew_ms} ms</strong></div>}
-          {cameraCount > 0 && <div><span>Max camera-to-encoder offset</span><strong>{quality.sensor_offset_ms} ms</strong></div>}
           <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
           <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
         </div>
-        <p className="hint">The nominal frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Timing uses camera presentation timestamps on macOS and host read times elsewhere. Neither is a hardware exposure measurement.'}</p>
-        {Object.entries(quality.camera_offset_ms ?? {}).map(([name, offsets]) => <p key={name} className="hint">{humanize(name)}: median {offsets.p50} ms relative to the encoder read midpoint (p1 {offsets.p1} ms, p95 {offsets.p95} ms, p99 {offsets.p99} ms).</p>)}
+        <p className="hint">The nominal dataset frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Image age is measured at encoder read end. Timing uses camera presentation timestamps on macOS and host read times elsewhere, not measured exposure times.'}</p>
+        {Object.entries(quality.camera_timing ?? {}).map(([name, capture]) => <p key={name} className="hint"><strong>{humanize(name)}</strong>{capture.fps != null && ` · ${capture.fps} camera FPS vs ${state.config.fps} dataset FPS`}: image age {capture.image_age_ms.p50} ms median, {capture.image_age_ms.p95} ms p95, {capture.image_age_ms.max} ms max. Median delivery {capture.delivery_ms.p50} ms; median wait after delivery {capture.wait_ms.p50} ms.</p>)}
         {quality.arm_path_peak?.excursion_ms != null && <p className="hint">Around the peak, {jointLabels[quality.arm_path_peak.joint]} was at least {quality.arm_path_peak.excursion_deg}° off the reference for {quality.arm_path_peak.excursion_ms > 0 ? `${quality.arm_path_peak.excursion_ms} ms` : 'one control tick'}.</p>}
         {quality.max_arm_path_error_deg != null && <p className="hint">Path error compares encoder readings with the replay reference at the same sample time. Servo commands can aim ahead of that reference.</p>}
       </div>

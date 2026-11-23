@@ -106,6 +106,10 @@ def test_preflight_roundtrips_images_and_causal_timestamps(writer):
     assert result["frames"] == 6
     assert result["video_bytes"] > 0
     assert result["dataset_fps"] == 15
+    manifest = json.loads((writer.root / "ghostpath.json").read_text())
+    assert manifest["observation_policy"]["avfoundation_buffer_seconds"] == (
+        writer.cameras.avfoundation_buffer
+    )
 
 
 def test_rejects_video_and_telemetry_frame_count_mismatch(writer, monkeypatch):
@@ -180,6 +184,14 @@ def test_joint_pairing_saves_episode_with_distinct_frames(physical_writer, strea
     quality = store.seal().result(timeout=30)
     assert quality["camera_skew_ms"] == pytest.approx(skew)
     assert quality["skipped_camera_samples"] == 0
+    view = quality["camera_timing"]["workspace"]
+    expected_age = max(index / 20 - pair[0] for index, pair in enumerate(expected)) * 1000
+    assert view["image_age_ms"]["max"] == pytest.approx(expected_age)
+    assert view["image_age_ms"] == view["wait_ms"]
+    assert view["delivery_ms"]["max"] == 0
+    source = streams["workspace"]
+    intervals = source.index(expected[-1][0]) - source.index(expected[0][0])
+    assert view["fps"] == round(intervals / (expected[-1][0] - expected[0][0]), 2)
     store.save("paired-cameras", "teach").result(timeout=30)
     store.finalize().result(timeout=30)
 

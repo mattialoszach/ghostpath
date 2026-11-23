@@ -9,8 +9,9 @@ import subprocess
 import sys
 import time
 from collections import deque
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Condition, Event, Thread
 
 import numpy as np
@@ -24,7 +25,8 @@ from .preview import render_camera
 STALE_AFTER = 0.30
 REOPEN_DELAY = 1.0
 MAX_FRAME_AGE = 0.175
-AVFOUNDATION_BUFFER = 0.105
+AVFOUNDATION_BUFFER = 0.075
+FRAME_HISTORY_SIZE = 12
 
 
 class CameraNotReady(ValueError):
@@ -89,12 +91,11 @@ def _camera_process(spec: CameraSpec, device_id: str):
 
 
 @dataclass(frozen=True)
-class CameraFrame:
+class CameraTiming:
     sequence: int
     timestamp: float
-    pixels: np.ndarray
-    arrival_timestamp: float | None = None
-    available_timestamp: float | None = None
+    arrival_timestamp: float | None = field(default=None, kw_only=True)
+    available_timestamp: float | None = field(default=None, kw_only=True)
 
     @property
     def arrived(self) -> float:
@@ -105,7 +106,30 @@ class CameraFrame:
         return self.arrived if self.available_timestamp is None else self.available_timestamp
 
 
-def _latest_match(groups: list[list[CameraFrame]], tolerance: float) -> list[CameraFrame] | None:
+@dataclass(frozen=True)
+class CameraFrame(CameraTiming):
+    pixels: np.ndarray
+
+
+def camera_candidates[Frame: CameraTiming](
+    history: Iterable[Frame], cutoff: float, after: int, scheduled: float, buffer: float
+) -> list[Frame]:
+    latest = min(cutoff, scheduled - buffer) if buffer else cutoff
+    return [
+        frame for frame in history
+        if frame.sequence > after
+        and cutoff - MAX_FRAME_AGE <= frame.timestamp <= latest
+        and frame.available <= cutoff
+    ]
+
+
+def pairing_tolerance(specs: list[CameraSpec]) -> float:
+    return 1.05 / min(spec.capture_fps for spec in specs)
+
+
+def latest_match[Frame: CameraTiming](
+    groups: list[list[Frame]], tolerance: float
+) -> list[Frame] | None:
     """Find the newest set that satisfies the camera-to-camera skew limit."""
     if not groups:
         return None
@@ -120,11 +144,23 @@ def _latest_match(groups: list[list[CameraFrame]], tolerance: float) -> list[Cam
     return None
 
 
+def timing_stats(values: Iterable[float]) -> dict[str, float]:
+    percentiles = np.percentile(tuple(values), (50, 95, 99, 100))
+    return dict(zip(
+        ("p50", "p95", "p99", "max"),
+        (round(float(value) * 1000, 1) for value in percentiles),
+        strict=True,
+    ))
+
+
 class Capture:
-    def __init__(self, spec: CameraSpec):
+    def __init__(
+        self, spec: CameraSpec, on_frame: Callable[[str, CameraTiming], None] | None = None
+    ):
         self.spec = spec
+        self.on_frame = on_frame
         self.condition = Condition()
-        self.history: deque[CameraFrame] = deque(maxlen=12)
+        self.history: deque[CameraFrame] = deque(maxlen=FRAME_HISTORY_SIZE)
         self.cadence: deque[float] = deque(maxlen=1 + 3 * spec.capture_fps)
         self.closed = Event()
         self.preview: bytes | None = None
@@ -229,7 +265,14 @@ class Capture:
             if self.cadence and stamp <= self.cadence[-1]:
                 return
             available = time.monotonic()
-            self.history.append(CameraFrame(self.sequence, stamp, pixels, arrival, available))
+            self.history.append(CameraFrame(
+                self.sequence, stamp, pixels,
+                arrival_timestamp=arrival, available_timestamp=available,
+            ))
+            if self.on_frame is not None:
+                self.on_frame(self.spec.name, CameraTiming(
+                    self.sequence, stamp, arrival_timestamp=arrival, available_timestamp=available
+                ))
             self.cadence.append(stamp)
             self.sequence += 1
             self.problem = ""
@@ -269,22 +312,17 @@ class Capture:
             return self.preview if self._fresh(time.monotonic()) else None
 
     def candidates(
-        self, cutoff: float, after: int, *, scheduled: float | None = None
+        self, cutoff: float, after: int, *,
+        scheduled: float | None = None, buffer: float = AVFOUNDATION_BUFFER,
     ) -> list[CameraFrame]:
         with self.condition:
             if self.closed.is_set() or self.problem:
                 raise ValueError(f"{self.spec.name}: {self.problem or 'camera capture closed'}")
-            buffered = self.mode and self.mode.get("timestamp_source") == "avfoundation_pts"
-            latest = cutoff
-            if buffered:
-                target = cutoff if scheduled is None else scheduled
-                latest = min(cutoff, target - AVFOUNDATION_BUFFER)
-            return [
-                frame for frame in self.history
-                if frame.sequence > after
-                and cutoff - MAX_FRAME_AGE <= frame.timestamp <= latest
-                and frame.available <= cutoff
-            ]
+            if not self.mode or self.mode.get("timestamp_source") != "avfoundation_pts":
+                buffer = 0
+            return camera_candidates(
+                self.history, cutoff, after, cutoff if scheduled is None else scheduled, buffer
+            )
 
     def status(self) -> dict:
         with self.condition:
@@ -300,11 +338,16 @@ class Capture:
 
 
 class Cameras:
-    def __init__(self, specs: list[CameraSpec], simulation: bool):
+    def __init__(
+        self, specs: list[CameraSpec], simulation: bool, *,
+        on_frame: Callable[[str, CameraTiming], None] | None = None,
+        avfoundation_buffer: float = AVFOUNDATION_BUFFER,
+    ):
         self.specs = specs
         self.recorded = [s for s in specs if s.record]
         self.simulation = simulation
-        self.captures = {} if simulation else {s.name: Capture(s) for s in specs}
+        self.avfoundation_buffer = avfoundation_buffer
+        self.captures = {} if simulation else {s.name: Capture(s, on_frame) for s in specs}
         self.indices = {s.name: i for i, s in enumerate(specs)}
         self.previews: dict[str, bytes] = {}
         self.demo_pose: Pose | None = None
@@ -382,18 +425,19 @@ class Cameras:
                 for spec in self.recorded
             ]
 
-        tolerance = 1.05 / min(spec.capture_fps for spec in self.recorded)
+        tolerance = pairing_tolerance(self.recorded)
         groups = []
         for spec in self.recorded:
             frames = self.captures[spec.name].candidates(
-                cutoff, after.get(spec.name, -1), scheduled=scheduled
+                cutoff, after.get(spec.name, -1),
+                scheduled=scheduled, buffer=self.avfoundation_buffer,
             )
             if not frames:
                 raise CameraSyncError(
                     f"{spec.name}: no fresh, unused camera frame at the observation cutoff"
                 )
             groups.append(frames)
-        if match := _latest_match(groups, tolerance):
+        if match := latest_match(groups, tolerance):
             return match
         raise CameraSyncError(
             f"Camera-to-camera skew exceeds {tolerance * 1000:.0f} ms at the observation cutoff."

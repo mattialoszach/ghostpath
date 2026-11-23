@@ -45,6 +45,12 @@ export interface Quality {
   discontinuities?: number[]
   sensor_offset_ms: number
   camera_offset_ms?: Record<string, { p1: number; p50: number; p95: number; p99: number }>
+  camera_timing?: Record<string, {
+    fps: number | null
+    image_age_ms: TimingStats
+    delivery_ms: TimingStats
+    wait_ms: TimingStats
+  }>
   max_arm_error_deg: number
   max_gripper_error_pct: number
   max_arm_path_error_deg?: number | null
@@ -57,6 +63,8 @@ export interface Quality {
   } | null
   review_frames: number
 }
+
+type TimingStats = { p50: number; p95: number; p99: number; max: number }
 
 export interface CameraMode {
   device_id?: string

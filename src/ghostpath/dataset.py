@@ -13,7 +13,7 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import AVFOUNDATION_BUFFER, MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg
+from .cameras import MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg, timing_stats
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
@@ -83,6 +83,7 @@ class Datasets:
         self.indices: dict[str, int] = {}
         self.camera_modes: dict = {}
         self.camera_offsets: dict[str, list[float]] = {}
+        self.camera_timings: dict[str, list[tuple[int, float, float, float]]] = {}
         self.discontinuities: list[int] = []
         self.last_saved_index = -1
         self.arm_path_peak: dict | None = None
@@ -115,6 +116,7 @@ class Datasets:
         self._clear()
         self.camera_modes = modes
         self.camera_offsets = {spec.name: [] for spec in self.cameras.recorded}
+        self.camera_timings = {spec.name: [] for spec in self.cameras.recorded}
         self.review_dir = TemporaryDirectory(prefix="ghostpath-review-")
 
     def _create(self, dataset_class, encoder):
@@ -255,6 +257,10 @@ class Datasets:
         for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
             self.camera_offsets[spec.name].append((capture.timestamp - stamp) * 1000)
+            self.camera_timings[spec.name].append((
+                capture.sequence, capture.timestamp, capture.available - capture.timestamp,
+                record.cutoff - capture.available,
+            ))
             if capture.pixels.shape != (spec.height, spec.width, 3):
                 raise ValueError(f"{spec.name}: unexpected frame dimensions")
             if capture.pixels.dtype != np.uint8:
@@ -341,6 +347,24 @@ class Datasets:
                 excursion_ms=round((ticks[last].timestamp - ticks[first].timestamp) * 1000, 1),
             )
 
+    def _camera_quality(self) -> dict:
+        result = {}
+        for name, samples in self.camera_timings.items():
+            if not samples:
+                continue
+            sequences, stamps, delivery, wait = zip(*samples, strict=True)
+            span = stamps[-1] - stamps[0]
+            result[name] = {
+                "fps": round((sequences[-1] - sequences[0]) / span, 2)
+                if span > 0 and not self.cameras.simulation else None,
+                "image_age_ms": timing_stats(
+                    delivered + waited for delivered, waited in zip(delivery, wait, strict=True)
+                ),
+                "delivery_ms": timing_stats(delivery),
+                "wait_ms": timing_stats(wait),
+            }
+        return result
+
     def _validate(self) -> dict:
         if self.error:
             raise ValueError(self.error)
@@ -366,6 +390,7 @@ class Datasets:
                 if offsets
             },
             "sensor_offset_ms": round(self.max_sensor_offset * 1000, 1),
+            "camera_timing": self._camera_quality(),
             "max_arm_error_deg": round(self.max_arm_error, 2),
             "max_gripper_error_pct": round(self.max_gripper_error, 2),
             "max_arm_path_error_deg": (
@@ -420,7 +445,7 @@ class Datasets:
                         "config": self.config.model_dump(mode="json"),
                         "observation_policy": {
                             "cutoff": "encoder_read_end",
-                            "avfoundation_buffer_seconds": AVFOUNDATION_BUFFER,
+                            "avfoundation_buffer_seconds": self.cameras.avfoundation_buffer,
                             "max_frame_age_seconds": MAX_FRAME_AGE,
                         },
                         "episodes": [*self.saved, record],
@@ -522,6 +547,7 @@ class Datasets:
         self.indices.clear()
         self.camera_modes = {}
         self.camera_offsets = {}
+        self.camera_timings = {}
         self.discontinuities = []
         self.last_saved_index = -1
         self.arm_path_peak = None
