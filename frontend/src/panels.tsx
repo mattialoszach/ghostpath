@@ -389,12 +389,17 @@ interface JogInput {
 
 const directionCodes = new Set<string>(Object.values(jogKeys).flat().map(key => key.code))
 
-export function ManualControls({ send, enabled }: { send: Send; enabled: boolean }) {
+export function ManualControls({ send, enabled, pending = false, replaying = false }: {
+  send: Send; enabled: boolean; pending?: boolean; replaying?: boolean
+}) {
   const panel = useRef<HTMLDivElement>(null)
   const input = useRef<JogInput | null>(null)
   const pressed = useRef(new Set<string>())
+  const spaceHeld = useRef(false)
+  const takeoverRequested = useRef(false)
   const active = useRef<Partial<Record<Joint, number>>>({})
   const [highlight, setHighlight] = useState(active.current)
+  const canJog = enabled && !pending && !replaying
 
   const transmit = useCallback(() => {
     const current = input.current
@@ -411,33 +416,43 @@ export function ManualControls({ send, enabled }: { send: Send; enabled: boolean
     send('jog', { axes })
   }, [send])
 
-  const stop = useCallback(() => {
+  const clear = useCallback(() => {
     input.current = null
+    spaceHeld.current = false
     pressed.current.clear()
     active.current = {}
     setHighlight(active.current)
+  }, [])
+
+  const stop = useCallback(() => {
+    clear()
     send('jog', { axes: {}, immediate_stop: true })
-  }, [send])
+  }, [clear, send])
 
   useEffect(() => {
-    if (!enabled) return
-    panel.current?.focus({ preventScroll: true })
-    const tick = window.setInterval(() => {
+    if (!enabled) {
+      clear()
+      return
+    }
+    if (replaying || canJog) panel.current?.focus({ preventScroll: true })
+    if (canJog && pressed.current.size) transmit()
+    const tick = canJog ? window.setInterval(() => {
       if (Object.keys(active.current).length) send('jog', { axes: active.current })
-    }, 80)
-    const visibility = () => { if (document.hidden) stop() }
-    window.addEventListener('blur', stop)
+    }, 80) : undefined
+    const cancel = canJog ? stop : clear
+    const visibility = () => { if (document.hidden) cancel() }
+    window.addEventListener('blur', cancel)
     document.addEventListener('visibilitychange', visibility)
     return () => {
       window.clearInterval(tick)
-      window.removeEventListener('blur', stop)
+      window.removeEventListener('blur', cancel)
       document.removeEventListener('visibilitychange', visibility)
-      stop()
+      if (canJog) stop()
     }
-  }, [enabled, send, stop])
+  }, [canJog, clear, enabled, replaying, send, stop, transmit])
 
   const start = (next: JogInput) => {
-    if (!enabled || input.current) return
+    if (!canJog || input.current) return
     pressed.current.clear()
     input.current = next
     transmit()
@@ -453,33 +468,52 @@ export function ManualControls({ send, enabled }: { send: Send; enabled: boolean
 
   return <div className="manual-controls keyboard-legend" role="group" ref={panel} tabIndex={enabled ? 0 : -1} aria-label="Manual controls"
     onBlur={event => {
-      if (enabled && (event.target === event.currentTarget || !event.currentTarget.contains(event.relatedTarget))) stop()
+      if (enabled && (event.target === event.currentTarget || !event.currentTarget.contains(event.relatedTarget))) {
+        if (canJog) stop()
+        else clear()
+      }
     }}
     onKeyDown={event => {
       if (!enabled || event.target !== event.currentTarget) return
+      if (event.key === 'Escape') {
+        clear()
+        return
+      }
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
       if (event.code === 'Space') {
         event.preventDefault()
+        if (replaying && !pending && !event.repeat) spaceHeld.current = true
         return
       }
       if (!directionCodes.has(event.code)) return
+      if (replaying ? !spaceHeld.current || (pending && !takeoverRequested.current) : !canJog) return
       event.preventDefault()
       if (!input.current && !event.repeat && !pressed.current.has(event.code)) {
         pressed.current.add(event.code)
-        transmit()
+        if (!replaying) transmit()
+        else if (!takeoverRequested.current) {
+          takeoverRequested.current = true
+          send('take_over', { confirmed: true })
+        }
       }
     }}
     onKeyUp={event => {
-      if (enabled && pressed.current.delete(event.code)) transmit()
+      if (event.code === 'Space' && spaceHeld.current) {
+        spaceHeld.current = false
+        const moving = pressed.current.size > 0
+        pressed.current.clear()
+        if (moving && canJog) transmit()
+      } else if (pressed.current.delete(event.code) && canJog) transmit()
     }}>
-    <p>Hold a direction key or button to move. Release to ease to a stop.</p>
+    <p>{replaying ? <>Hold <kbd>Space</kbd> and press a direction key to take over. Replay ends, but recording continues.</>
+      : 'Hold a direction key or button to move. Release to ease to a stop.'}</p>
     <dl>{joints.map(joint => <div key={joint}>
       <dt>{jointLabels[joint]}</dt>
       {jogKeys[joint].map(({ code, label, value }) => <dd key={code}>
-        <button type="button" disabled={!enabled} className={`jog-shortcut ${highlight[joint] === value ? 'held' : ''}`}
+        <button type="button" disabled={!canJog} className={`jog-shortcut ${highlight[joint] === value ? 'held' : ''}`}
           aria-label={`${jointLabels[joint]} ${label.toLowerCase()}`}
           onPointerDown={event => {
-            if (!enabled || event.button !== 0 || input.current) return
+            if (!canJog || event.button !== 0 || input.current) return
             event.preventDefault()
             panel.current?.focus({ preventScroll: true })
             event.currentTarget.setPointerCapture(event.pointerId)

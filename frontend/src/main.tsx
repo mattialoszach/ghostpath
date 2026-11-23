@@ -127,8 +127,8 @@ function DatasetOutput({ path }: { path: string }) {
   </div>
 }
 
-function Workflow({ state, config, send, available }: {
-  state: State | null; config: Config; send: Send; available: boolean
+function Workflow({ state, config, send, online, available }: {
+  state: State | null; config: Config; send: Send; online: boolean; available: boolean
 }) {
   const [confirm, setConfirm] = useState<Confirm | null>(null)
   const [poseLabel, setPoseLabel] = useState('')
@@ -137,6 +137,7 @@ function Workflow({ state, config, send, available }: {
   const [gripAssist, setGripAssist] = useState(false)
   useEffect(() => setManualFinish(config.mode === 'hybrid'), [config.mode])
   const phase = state?.phase ?? 'setup'
+  const replayKeyboard = phase === 'replay' && Boolean(state?.manual_finish)
   const firmCarryGrip = firmGripChoice ?? state?.firm_carry_grip ?? false
   const simulated = config.device === 'simulation'
   const atStart = state?.at_start
@@ -333,7 +334,7 @@ function Workflow({ state, config, send, available }: {
             </label>}
             <label className="manual-option">
               <input type="checkbox" checked={manualFinish} disabled={!available} onChange={event => setManualFinish(event.target.checked)} />
-              <span><strong>Manual finish</strong><small>Open manual controls automatically at the end of replay.</small></span>
+              <span><strong>Manual finish</strong><small>Take over with Space + a direction key during replay, or start manual control when it ends.</small></span>
             </label>
             {state?.grip?.saved && <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
           </div>
@@ -361,7 +362,7 @@ function Workflow({ state, config, send, available }: {
         </div>
         {state?.grip && (state.grip.enabled || phase === 'replay') &&
           <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
-        {phase === 'replay' && <p className="hint">Taking over ends replay, not the recording.</p>}
+        {phase === 'replay' && !replayKeyboard && <p className="hint">Taking over ends replay, not the recording.</p>}
       </>
       if (phase === 'replay') controls = <>
         <button className="button primary" disabled={!available} onClick={() => send('take_over', { confirmed: true })}><Hand size={15} /> Take over</button>
@@ -372,7 +373,6 @@ function Workflow({ state, config, send, available }: {
       title = 'Manual control · recording'
       detail = state?.notice ?? 'Recording continues under manual control.'
       controls = <button className="button primary" disabled={!available} onClick={() => send('finish_manual')}><Square size={14} /> Finish recording</button>
-      extra = <ManualControls send={send} enabled={available && !confirm} />
       break
     case 'processing':
     case 'saving':
@@ -430,6 +430,8 @@ function Workflow({ state, config, send, available }: {
     {(controls || extra) && <div className="workflow-content">
       {controls && <div className="actions">{controls}</div>}
       {extra}
+      {(replayKeyboard || phase === 'manual') &&
+        <ManualControls send={send} enabled={online && !confirm} pending={!available} replaying={replayKeyboard} />}
       {canManageRest && <details className="episode-options">
         <summary><ChevronDown size={14} /> Rest position<span>{state?.rest_target ? state.at_rest ? 'At rest' : 'Saved' : 'Not set'}</span></summary>
         <div>
@@ -487,7 +489,7 @@ function App() {
         setConfig(next)
       }} available={available} connect={() => send('connect', { config: setupConfig })} /> :
         <div className="main-stack">
-          <Workflow state={state} config={activeConfig} send={send} available={available} />
+          <Workflow state={state} config={activeConfig} send={send} online={online} available={available} />
           {phase !== 'finished' && <>
             <CameraPanel config={activeConfig} state={state} online={online} reviewIndex={takeFrame} setReviewIndex={setTakeFrame} />
             <details className="diagnostics">
