@@ -8,6 +8,7 @@ from ghostpath.camera_check import _check_export
 from ghostpath.cameras import CameraFrame, Cameras
 from ghostpath.dataset import Datasets, Record
 from ghostpath.models import CameraSpec, Configuration
+from ghostpath.motion import JOINTS
 from ghostpath.robot import SimulatedFollower
 from ghostpath.session import CONTROL
 
@@ -54,7 +55,9 @@ def test_official_v3_roundtrip_discard_and_failed_save(writer, monkeypatch):
     writer.discard().result(timeout=30)
     assert writer.accepted == 0
     stage(writer)
-    writer.save("pass-1", "teach").result(timeout=30)
+    start = SimulatedFollower(CONTROL).read()
+    rest = {**start, "shoulder_pan": -12.0}
+    writer.save("pass-1", "teach", start_pose=start, rest_pose=rest).result(timeout=30)
 
     stage(writer)
     committed = {file: file.read_bytes() for file in writer._output_files()}
@@ -78,6 +81,23 @@ def test_official_v3_roundtrip_discard_and_failed_save(writer, monkeypatch):
     assert data.features["action"]["names"][0] == "shoulder_pan.pos"
     assert data.num_frames == 12
     assert data.num_episodes == 2
+    manifest = json.loads((writer.root / "ghostpath.json").read_text())
+    policy = manifest["policy_io"]
+    assert policy["fps"] == data.fps
+    assert policy["cameras"] == [
+        {"name": "front", "key": "observation.images.front", "width": 160, "height": 120,
+         "capture_fps": 30, "color_order": "RGB"},
+    ]
+    assert policy["joint_order"] == list(JOINTS)
+    assert policy["units"]["shoulder_pan"] == "degrees"
+    assert policy["units"]["gripper"] == "percent_calibrated_travel"
+    assert policy["state"]["key"] == "observation.state"
+    assert policy["action"] == {"key": "action", "kind": "absolute_servo_position_goal"}
+    assert manifest["observation_policy"]["max_camera_skew_seconds"] == pytest.approx(0.035)
+    assert not manifest["observation_policy"]["reuse_frames"]
+    assert manifest["episodes"][0]["poses"] == {"task_start": start, "rest": rest}
+    assert manifest["episodes"][1]["poses"]["rest"] is None
+    assert not {"port", "calibration_dir"} & manifest["config"].keys()
     assert "observation.images.preview" not in data.features
     first, last = data[0], data[11]
     assert first["observation.images.front"].shape == (3, 120, 160)

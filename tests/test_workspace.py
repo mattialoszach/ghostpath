@@ -335,6 +335,11 @@ def test_replay_records_initial_alignment_and_manual_handoff(
                 }
             )
             wait_for(ws, lambda s: s["phase"] == "ready")
+            ws.send_json({"action": "demo_move", "axes": {"shoulder_pan": -5}})
+            parking = wait_for(ws, lambda s: s["pose"]["shoulder_pan"] == -5)["pose"]
+            ws.send_json({"action": "capture_rest"})
+            wait_for(ws, lambda s: s["rest_target"] == parking)
+            ws.send_json({"action": "demo_move", "axes": {"shoulder_pan": 0}})
             ws.send_json({"action": "load_path", "path_id": save_id})
             ready = wait_for(ws, lambda s: s["phase"] == "reset" and s["at_start"])
             assert ready["path"]["teaching_duration"] == 0.65
@@ -384,7 +389,12 @@ def test_replay_records_initial_alignment_and_manual_handoff(
     assert not dataset[0]["ghostpath.manual"].item()
     assert dataset[dataset.num_frames - 1]["ghostpath.manual"].item()
     assert dataset[0]["observation.state"][3].item() == pytest.approx(0, abs=0.05)
-    entries = json.loads((root / "ghostpath.json").read_text())["episodes"]
+    manifest = json.loads((root / "ghostpath.json").read_text())
+    entries = manifest["episodes"]
+    assert manifest["policy_io"]["robot"]["calibration_hash"] == "simulation"
+    assert manifest["policy_io"]["robot"]["position_limits"]["gripper"] == [0, 100]
+    assert entries[0]["poses"] == {"task_start": ready["reset_target"], "rest": parking}
+    assert entries[0]["poses"]["task_start"]["wrist_flex"] == pytest.approx(1.2)
     assert entries[0]["manual_finish"]
     assert entries[0]["replay_timing"] == timing
     control = json.loads((root / entries[0]["control_trace"]).read_text())

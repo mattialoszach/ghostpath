@@ -13,7 +13,7 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg, timing_stats
+from .cameras import MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg, pairing_tolerance, timing_stats
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
@@ -58,8 +58,14 @@ def load_dataset_backend():
 
 
 class Datasets:
-    def __init__(self, root: Path, config: Configuration, cameras: Cameras):
+    def __init__(
+        self, root: Path, config: Configuration, cameras: Cameras, *,
+        calibration_hash: str | None = None,
+        joint_limits: dict[str, tuple[float, float]] | None = None,
+    ):
         self.root, self.config, self.cameras = root, config, cameras
+        self.calibration_hash = calibration_hash
+        self.joint_limits = joint_limits.copy() if joint_limits is not None else None
         self.repo_id = f"local/{root.name}"
         self.dataset = None
         self.created = False
@@ -405,11 +411,47 @@ class Datasets:
         }
 
     def save(
-        self, path_id: str, mode: str, *, manual_finish: bool = False, firm_carry_grip: bool = False
+        self, path_id: str, mode: str, *,
+        manual_finish: bool = False, firm_carry_grip: bool = False,
+        start_pose: Pose | None = None, rest_pose: Pose | None = None,
     ) -> Future:
-        return self.executor.submit(self._save, path_id, mode, manual_finish, firm_carry_grip)
+        poses = {
+            "task_start": start_pose.copy() if start_pose is not None else None,
+            "rest": rest_pose.copy() if rest_pose is not None else None,
+        }
+        return self.executor.submit(
+            self._save, path_id, mode, manual_finish, firm_carry_grip, poses
+        )
 
-    def _save(self, path_id: str, mode: str, manual_finish: bool, firm_carry_grip: bool):
+    def _policy_io(self) -> dict:
+        return {
+            "fps": self.config.fps,
+            "cameras": [
+                {
+                    **camera.model_dump(include={"name", "width", "height", "capture_fps"}),
+                    "key": f"observation.images.{camera.name}",
+                    "color_order": "RGB",
+                }
+                for camera in self.cameras.recorded
+            ],
+            "joint_order": JOINTS,
+            "units": {
+                joint: "percent_calibrated_travel" if joint == "gripper" else "degrees"
+                for joint in JOINTS
+            },
+            "state": {"key": "observation.state", "kind": "measured_position"},
+            "action": {"key": "action", "kind": "absolute_servo_position_goal"},
+            "robot": {
+                "device": self.config.device,
+                "calibration_hash": self.calibration_hash,
+                "position_limits": self.joint_limits,
+            },
+        }
+
+    def _save(
+        self, path_id: str, mode: str, manual_finish: bool, firm_carry_grip: bool,
+        poses: dict[str, Pose | None],
+    ):
         quality = self._validate()
         record = {
             "episode": self.accepted,
@@ -418,6 +460,7 @@ class Datasets:
             "manual_finish": manual_finish,
             "firm_carry_grip": firm_carry_grip,
             "cameras": self.camera_modes,
+            "poses": poses,
             **quality,
         }
         accepted_before = self._output_files()
@@ -442,11 +485,18 @@ class Datasets:
                     self.root / "ghostpath.json",
                     {
                         "version": 2,
-                        "config": self.config.model_dump(mode="json"),
+                        "config": self.config.model_dump(
+                            mode="json", exclude={"port", "calibration_dir"}
+                        ),
+                        "policy_io": self._policy_io(),
                         "observation_policy": {
                             "cutoff": "encoder_read_end",
+                            "grid_origin": "first_encoder_read_midpoint",
                             "avfoundation_buffer_seconds": self.cameras.avfoundation_buffer,
                             "max_frame_age_seconds": MAX_FRAME_AGE,
+                            "max_camera_skew_seconds": pairing_tolerance(self.cameras.recorded)
+                            if self.cameras.recorded else None,
+                            "reuse_frames": False,
                         },
                         "episodes": [*self.saved, record],
                     },

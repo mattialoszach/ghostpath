@@ -380,7 +380,8 @@ class Session:
                 raise WorkflowError(str(exc)) from exc
             if self.datasets is None:
                 self.datasets = Datasets(
-                    self.data / "datasets" / self.config.dataset, self.config, self.cameras
+                    self.data / "datasets" / self.config.dataset, self.config, self.cameras,
+                    calibration_hash=self.robot.calibration_hash, joint_limits=self.robot.limits,
                 )
             self.manual_finish = (
                 cmd.manual_finish
@@ -418,6 +419,8 @@ class Session:
                     self.config.mode,
                     manual_finish=self.manual_finish,
                     firm_carry_grip=bool(self.replay_firm_carries),
+                    start_pose=self._reset_goal(),
+                    rest_pose=self._park_goal(),
                 ),
             )
         elif action in {"retry", "discard"}:

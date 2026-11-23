@@ -122,6 +122,7 @@ function DatasetOutput({ path }: { path: string }) {
     <div className="export-path"><ArrowDownToLine size={15} /><code>{path}</code>
       <button className="button" onClick={copy}>Copy path</button>
     </div>
+    <p className="hint">Keep ghostpath.json with the dataset. It records policy inputs, timing, and each episode’s start and rest positions.</p>
     {feedback && <p className="hint" role="status">{feedback}</p>}
   </div>
 }
