@@ -130,6 +130,7 @@ function Workflow({ state, config, send, available }: {
   state: State | null; config: Config; send: Send; available: boolean
 }) {
   const [confirm, setConfirm] = useState<Confirm | null>(null)
+  const [poseLabel, setPoseLabel] = useState('')
   const [manualFinish, setManualFinish] = useState(config.mode === 'hybrid')
   const [firmGripChoice, setFirmCarryGrip] = useState<boolean | null>(null)
   const [gripAssist, setGripAssist] = useState(false)
@@ -141,6 +142,7 @@ function Workflow({ state, config, send, available }: {
   const hasStart = Boolean(state?.start_pose)
   const motionPowered = simulated || state?.torque === 'on'
   const canReturn = available && motionPowered
+  const canManageRest = Boolean(state?.connected && !state.fault && ['ready', 'reset', 'next', 'finished'].includes(phase))
   const canManagePower = Boolean(state?.connected && !state.fault && ['ready', 'teach_paused', 'reset', 'review', 'next', 'finished'].includes(phase))
   const canDiscard = phase === 'teaching' || phase === 'teach_paused' ||
     Boolean(state?.path && ['reset', 'reset_released', 'returning'].includes(phase))
@@ -180,6 +182,11 @@ function Workflow({ state, config, send, available }: {
   )
   const returnButton = (primary: boolean) => <button className={`button ${primary ? 'primary' : ''}`}
     disabled={!canReturn} onClick={autoReset}><RotateCcw size={15} /> Return to start</button>
+  const park = () => instruct(
+    'park', 'Return to the saved rest pose?',
+    'Empty the gripper and clear the entire route. The arm will move directly to the rest pose, not the episode start.',
+    'Return to rest', { allow_auto_reset_once: !config.automatic_reset },
+  )
   const torqueOn = state?.torque === 'on'
   const changePower = () => torqueOn
     ? instruct('release_torque', 'Turn torque off?', 'Support the arm and empty the gripper first. The arm can drop when its motors release.', 'Turn torque off')
@@ -203,6 +210,9 @@ function Workflow({ state, config, send, available }: {
   switch (phase) {
     case 'ready': {
       const savedPoses = state?.start_poses ?? []
+      const selected = savedPoses.find(pose => pose.id === state?.start_pose_id)
+      const earlier = savedPoses.filter(pose => pose.legacy)
+      const poseOption = (pose: typeof savedPoses[number]) => <option value={pose.id} key={pose.id}>{pose.label} · {new Date(pose.created).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</option>
       title = !hasStart ? 'Choose a start pose' : atStart ? 'Ready to teach' : 'Move to the selected start'
       detail = !hasStart
         ? simulated ? 'Use the current position to set a start pose for the example.' : 'Position the arm by hand and use its current position, or select a saved pose.'
@@ -210,17 +220,32 @@ function Workflow({ state, config, send, available }: {
         : motionPowered ? 'Return to start to get ready to teach.'
         : 'Position the arm by hand, or turn torque on for an automatic return.'
       extra = <>
-        {state?.notice.startsWith('Episode discarded.') && <p className="hint" role="status">{state.notice}</p>}
+        {state?.notice.match(/^(Episode discarded|Start pose saved|Saved start deleted)\./) && <p className="hint" role="status">{state.notice}</p>}
         <div className="start-picker">
-          <button className={`button ${hasStart ? '' : 'primary'}`} disabled={!available} onClick={() => send('capture_start')}><Crosshair size={15} /> Use current position</button>
+          <button className={`button ${hasStart ? '' : 'primary'}`} disabled={!available} onClick={() => { setPoseLabel(''); send('capture_start') }}><Crosshair size={15} /> Use current position</button>
           <label className="field">Saved start poses
             <select value={state?.start_pose_id ?? ''} disabled={!available || !savedPoses.length}
               onChange={event => { if (event.target.value) send('select_start', { pose_id: event.target.value }) }}>
               <option value="">{savedPoses.length ? 'Choose a saved pose' : 'No saved poses yet'}</option>
-              {savedPoses.map(saved => <option value={saved.id} key={saved.id}>{saved.label} · {new Date(saved.created).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</option>)}
+              {savedPoses.filter(pose => !pose.legacy).map(poseOption)}
+              {earlier.length > 0 && <optgroup label="Earlier captures">{earlier.map(poseOption)}</optgroup>}
             </select>
           </label>
         </div>
+        {hasStart && (!selected || selected.legacy) && <details className="episode-options">
+          <summary><ChevronDown size={14} /> Save this start for later</summary>
+          <div>
+            <p className="hint">Using the current position does not save it. Name this selected start if you want to reuse it in another session.</p>
+            <form className="start-picker" onSubmit={event => { event.preventDefault(); send('save_start', { pose_label: poseLabel.trim() }) }}>
+              <button className="button" disabled={!available || !poseLabel.trim()}><Save size={15} /> Save start</button>
+              <label className="field">Start name<input value={poseLabel} onChange={event => setPoseLabel(event.target.value)} maxLength={60} /></label>
+            </form>
+          </div>
+        </details>}
+        {selected && <div><button className="text-button" disabled={!available} onClick={() => setConfirm({
+          title: 'Delete this saved start?', text: 'This removes the library entry. Your current task start, paths, and datasets are unchanged.',
+          label: 'Delete saved start', submit: () => send('delete_start', { pose_id: selected.id, confirmed: true }),
+        })}><X size={14} /> Delete saved start</button></div>}
         {simulated && state?.torque === 'off' && <details className="virtual"><summary>Position the simulated arm</summary><VirtualJoints state={state} send={send} /></details>}
         {state && state.paths.length > 0 && <details className="virtual"><summary>Load a taught path</summary><SavedPaths state={state} send={send} available={available} /></details>}
       </>
@@ -384,6 +409,25 @@ function Workflow({ state, config, send, available }: {
     {(controls || extra) && <div className="workflow-content">
       {controls && <div className="actions">{controls}</div>}
       {extra}
+      {canManageRest && <details className="episode-options">
+        <summary><ChevronDown size={14} /> Rest position<span>{state?.rest_target ? state.at_rest ? 'At rest' : 'Saved' : 'Not set'}</span></summary>
+        <div>
+          <p className="hint">Rest is a parking position, separate from the task start. Saving it does not move the arm.</p>
+          <div className="actions">
+            <button className="button" disabled={!available} onClick={() => state?.rest_target ? setConfirm({
+              title: 'Replace the saved rest position?', text: 'Save the current arm position as the new rest. The task start does not change.',
+              label: 'Replace rest', submit: () => send('capture_rest', { confirmed: true }),
+            }) : send('capture_rest')}><Save size={15} /> {state?.rest_target ? 'Replace rest with current' : 'Save current as rest'}</button>
+            {state?.rest_target && <>
+              <button className="button" disabled={!canReturn || state.at_rest} onClick={park}><RotateCcw size={15} /> Return to rest</button>
+              <button className="text-button" disabled={!available} onClick={() => setConfirm({
+                title: 'Clear the saved rest position?', text: 'This removes the parking position without moving the arm.',
+                label: 'Clear rest', submit: () => send('clear_rest', { confirmed: true }),
+              })}><X size={14} /> Clear rest</button>
+            </>}
+          </div>
+        </div>
+      </details>}
     </div>}
     {(canDiscard || canManagePower) && <div className="workflow-secondary">
       {canManagePower && <button className="text-button" disabled={!available} onClick={changePower}>

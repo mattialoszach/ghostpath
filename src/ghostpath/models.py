@@ -91,7 +91,10 @@ class Command(StrictModel):
         "disconnect",
         "capture_start",
         "select_start",
+        "save_start",
+        "delete_start",
         "capture_rest",
+        "clear_rest",
         "park",
         "release_torque",
         "hold_torque",
@@ -130,5 +133,6 @@ class Command(StrictModel):
     axes: dict[str, float] = Field(default_factory=dict, max_length=6)
     path_id: str = ""
     pose_id: str = ""
+    pose_label: str = Field(default="", max_length=60)
     reuse: bool | None = None
     manual_finish: bool | None = None

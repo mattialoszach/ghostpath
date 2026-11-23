@@ -62,6 +62,7 @@ FAST_REPLAY = replace(
 REPLAY_SETTINGS = {ReplayProfile.STANDARD: CONTROL, ReplayProfile.FAST: FAST_REPLAY}
 ACTIVE = {Phase.TEACHING, Phase.RESET_RELEASED, Phase.RETURNING, Phase.REPLAY, Phase.MANUAL}
 IDLE = {Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.REVIEW, Phase.NEXT, Phase.FINISHED}
+REST_PHASES = (Phase.READY, Phase.RESET, Phase.NEXT, Phase.FINISHED)
 
 
 class WorkflowError(ValueError):
@@ -252,26 +253,52 @@ class Session:
                 self._begin_operation("disconnect", self.datasets.finalize())
             else:
                 self._disconnect()
-        elif action == "capture_rest":
-            self._require(*IDLE)
-            self.rest_pose = self._capture_pose(rest=True)
-            self.notice = "Rest pose saved."
+        elif action in {"capture_rest", "clear_rest"}:
+            self._require(*REST_PHASES)
+            if self.rest_pose is not None and not cmd.confirmed:
+                raise WorkflowError("Confirm changing the saved rest pose.")
+            file = self._pose_file(rest=True)
+            if action == "capture_rest":
+                self.pose = self.robot.read()
+                position = automatic_pose(self.pose, self.motion, self._joint_margin())
+            try:
+                if action == "capture_rest":
+                    write_json(file, {"version": 1, "position": position})
+                    self.rest_pose = position
+                    self.notice = "Rest pose saved."
+                else:
+                    file.unlink(missing_ok=True)
+                    self.rest_pose = None
+                    self.notice = "Rest pose cleared."
+            except OSError as exc:
+                raise WorkflowError(f"Could not change the saved rest pose: {exc}") from exc
         elif action in {"capture_start", "select_start"}:
             self._require(Phase.READY)
             self.pose = self.robot.read()
-            selected = (
-                self._save_current_start()
-                if action == "capture_start"
-                else (self.saved_starts.get(cmd.pose_id))
-            )
-            if selected is None:
-                raise WorkflowError("Choose a saved start pose for this arm.")
-            self.start_pose_id, self.start_pose = selected.id, selected.position.copy()
+            if action == "capture_start":
+                self.start_pose_id, self.start_pose = None, self.motion.clamp(self.pose)
+            else:
+                selected = self.saved_starts.get(cmd.pose_id)
+                if selected is None:
+                    raise WorkflowError("Choose a saved start pose for this arm.")
+                self.start_pose_id, self.start_pose = selected.id, selected.position.copy()
             self.notice = (
                 "Start selected. You can begin teaching."
                 if self._near(self._reset_goal())
                 else "Start selected. Return to it to begin teaching."
             )
+        elif action == "save_start":
+            self._require(Phase.READY)
+            if self.start_pose is None:
+                raise WorkflowError("Choose a start pose before saving it.")
+            label = cmd.pose_label.strip()
+            if not label:
+                raise WorkflowError("Enter a name for the saved start pose.")
+            self.start_pose_id = self._save_start(label)
+            self.notice = "Start pose saved."
+        elif action == "delete_start":
+            self._require(Phase.READY)
+            self._delete_start(cmd)
         elif action in {"release_torque", "hold_torque"}:
             self._require(*IDLE)
             self._confirmed(cmd, "Support the arm and gripper before changing torque.")
@@ -505,69 +532,75 @@ class Session:
             pass
         return None
 
-    def _capture_pose(self, *, rest: bool) -> Pose:
-        self.pose = self.robot.read()
-        pose = self.motion.clamp(self.pose)
-        try:
-            write_json(self._pose_file(rest=rest), {"version": 1, "position": pose})
-        except OSError as exc:
-            raise WorkflowError(f"Could not save the pose: {exc}") from exc
-        return pose
-
     def _start_library(self) -> Path:
         return self.data / "start-poses" / self._pose_file().stem
 
-    def _save_current_start(self) -> SavedStart:
-        position = self.motion.clamp(self.pose)
+    def _save_start(self, label: str) -> str:
+        position = self.start_pose.copy()
         for saved in self.saved_starts.values():
-            if saved.position == position:
-                return saved
+            if not saved.legacy and saved.label == label and saved.position == position:
+                return saved.id
         ident = uuid4().hex[:12]
         created = datetime.now(UTC).isoformat()
         try:
             write_json(
                 self._start_library() / f"{ident}.json",
-                {"version": 1, "position": position, "created": created},
+                {"version": 1, "label": label, "position": position, "created": created},
             )
         except OSError as exc:
             raise WorkflowError(f"Could not save the start pose: {exc}") from exc
-        saved = SavedStart(ident, "Saved position", created, position)
+        saved = SavedStart(ident, label, created, position)
         self.saved_starts = {ident: saved, **self.saved_starts}
-        return saved
+        return ident
 
-    def _saved_start_options(self, historical: list[SavedStart]) -> dict[str, SavedStart]:
+    def _delete_start(self, cmd: Command):
+        ident = cmd.pose_id
+        if not cmd.confirmed or ident not in self.saved_starts:
+            raise WorkflowError("Confirm which saved start pose to delete.")
+        file = (
+            self._pose_file() if ident == "previous-start"
+            else self._start_library() / f"{ident}.json"
+        )
+        try:
+            file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise WorkflowError(f"Could not delete the saved start pose: {exc}") from exc
+        del self.saved_starts[ident]
+        if self.start_pose_id == ident:
+            self.start_pose_id = None
+        self.notice = "Saved start deleted. The session's selected position is unchanged."
+
+    def _saved_start_options(self) -> dict[str, SavedStart]:
         candidates = []
         for file in self._start_library().glob("*.json"):
+            if not re.fullmatch(r"[a-f0-9]{12}", file.stem):
+                continue
             try:
                 data = json.loads(file.read_text())
                 self.motion.check_pose(data["position"])
                 if data["version"] == 1 and isinstance(data["created"], str):
+                    label = data.get("label")
+                    named = isinstance(label, str) and bool(label.strip())
                     candidates.append(
-                        SavedStart(file.stem, "Saved position", data["created"], data["position"])
+                        SavedStart(
+                            file.stem, label if named else "Earlier start",
+                            data["created"], data["position"], legacy=not named,
+                        )
                     )
             except (OSError, ValueError, TypeError, KeyError, SafetyFault):
                 continue
         candidates.sort(key=lambda saved: saved.created, reverse=True)
-        for rest, ident in ((False, "previous-start"), (True, "previous-rest")):
-            position = self._read_saved_pose(rest=rest)
-            if position:
-                file = self._pose_file(rest=rest)
-                try:
-                    created = datetime.fromtimestamp(file.stat().st_mtime, UTC).isoformat()
-                except OSError:
-                    continue
+        position = self._read_saved_pose(rest=False)
+        if position:
+            try:
+                created = datetime.fromtimestamp(self._pose_file().stat().st_mtime, UTC).isoformat()
+            except OSError:
+                pass
+            else:
                 candidates.append(
-                    SavedStart(
-                        ident, "Previous start" if not rest else "Previous rest", created, position
-                    )
+                    SavedStart("previous-start", "Previous start", created, position, legacy=True)
                 )
-        options, positions = {}, set()
-        for saved in [*candidates, *historical]:
-            key = tuple(saved.position[j] for j in JOINTS)
-            if key not in positions:
-                options[saved.id] = saved
-                positions.add(key)
-        return options
+        return {saved.id: saved for saved in candidates}
 
     def _close_devices(self):
         if self.robot is not None:
@@ -627,9 +660,10 @@ class Session:
         return JOINT_MARGIN if self.config.device == "so101" else 0.0
 
     def _park_goal(self) -> Pose | None:
-        if self.rest_pose:
-            return automatic_pose(self.rest_pose, self.motion, self._joint_margin())
-        return self._reset_goal()
+        return (
+            automatic_pose(self.rest_pose, self.motion, self._joint_margin())
+            if self.rest_pose is not None else None
+        )
 
     def _near(self, goal: Pose | None, pose: Pose | None = None) -> bool:
         pose = self.pose if pose is None else pose
@@ -663,15 +697,11 @@ class Session:
         return latched
 
     def _auto_reset(self, cmd: Command, *, reverse: bool = False, park: bool = False):
-        phases = (
-            (Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.NEXT, Phase.FINISHED)
-            if park
-            else (Phase.READY, Phase.TEACH_PAUSED, Phase.RESET)
-        )
+        phases = REST_PHASES if park else (Phase.READY, Phase.TEACH_PAUSED, Phase.RESET)
         self._require(*phases)
         goal = self._park_goal() if park else self._reset_goal()
         if goal is None:
-            raise WorkflowError("Choose a start pose first.")
+            raise WorkflowError("Save a rest pose first." if park else "Choose a start pose first.")
         if self.config.device == "so101" and not (
             self.config.automatic_reset or cmd.allow_auto_reset_once
         ):
@@ -766,7 +796,6 @@ class Session:
 
     def _refresh_paths(self):
         paths = []
-        historical = []
         if self.robot:
             for file in sorted((self.data / "paths").glob("*.json"), reverse=True)[:200]:
                 try:
@@ -781,20 +810,10 @@ class Session:
                                 "grip_edited": "grip_edits" in item,
                             }
                         )
-                        position = item["start_pose"]
-                        self.motion.check_pose(position)
-                        historical.append(
-                            SavedStart(
-                                f"path-{file.stem}",
-                                f"Start of {item['task']}",
-                                item["created"],
-                                position,
-                            )
-                        )
                 except (OSError, ValueError, TypeError, KeyError, IndexError, SafetyFault):
                     continue
         self.paths = paths
-        self.saved_starts = self._saved_start_options(historical)
+        self.saved_starts = self._saved_start_options()
 
     def _same_robot(self, item: dict):
         return (
@@ -1006,7 +1025,7 @@ class Session:
             self.chart = []
             self.taught_grip = []
             self.phase = Phase.READY
-            self.notice = "Return to the saved start pose before teaching again."
+            self.notice = "Return to the selected start pose before teaching again."
 
     def _servo_origin(self, latched: Pose) -> Pose:
         if isinstance(self.robot, Follower):

@@ -96,8 +96,10 @@ export interface State {
   pose: Pose | null
   start_pose: Pose | null
   start_pose_id: string | null
-  start_poses: { id: string; label: string; created: string }[]
+  start_poses: { id: string; label: string; created: string; legacy: boolean }[]
   reset_target: Pose | null
+  rest_target: Pose | null
+  at_rest: boolean
   can_continue: boolean
   manual_finish: boolean
   firm_carry_grip: boolean

@@ -30,7 +30,7 @@ Open [localhost:8765](http://127.0.0.1:8765/) in one browser tab. Choose **Conne
 
 1. Set up and calibrate the **follower** using the [LeRobot SO-101 guide](https://huggingface.co/docs/lerobot/so101). In GhostPath, select **SO-101**, scan for the serial port, and enter the same calibration ID.
 2. Name the dataset, describe the task, and check your camera sources. Only cameras with **Record** enabled go into the dataset. You can also record joints without cameras.
-3. Save a start pose, **Start teaching**, and move the follower by hand. Hold it still when you **Stop teaching**. Reset the arm and objects by hand, or try **Boomerang scene reset** if the task can be reversed.
+3. Use the current position as a temporary start or choose a saved one. **Start teaching** and move the follower by hand. Hold it still when you **Stop teaching**. Reset the arm and objects by hand, or try **Boomerang scene reset** if the task can be reversed.
 4. Clear the path and step out of the camera views. **Replay & record**, check the take, and save it if it looks right. You can reuse the path or teach a new one for the next episode.
 
 **Before moving real hardware:** Try the simulator first. Support the arm and anything it’s holding before releasing torque. Stay with the arm during powered motion and keep a physical way to cut motor power. **Stop motion** or **Esc** is a software stop, not a substitute for cutting power.

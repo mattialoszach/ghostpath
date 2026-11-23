@@ -60,6 +60,7 @@ def test_discard_episode_preserves_start_library_and_saved_count(tmp_path, power
     session._command(Command(action="connect"))
     try:
         session._command(Command(action="capture_start"))
+        session._command(Command(action="save_start", pose_label="Demo start"))
         selected = session.start_pose_id
         session._command(Command(action="teach"))
         pose = {**session.pose, "wrist_flex": 5.0}
@@ -86,6 +87,9 @@ def test_discard_episode_preserves_start_library_and_saved_count(tmp_path, power
         assert session.power.state == ("on" if powered_reset else "off")
         if powered_reset:
             assert session._path_file(ident).exists()
+            session._refresh_paths()
+            assert {entry["id"] for entry in session.paths} == {ident}
+            assert set(session.saved_starts) == {selected}
     finally:
         session._close_devices()
 
@@ -447,12 +451,21 @@ def test_current_and_saved_poses_are_selectable_without_a_rest_pose(tmp_path):
             session._command(Command(action="teach"))
 
         session._command(Command(action="capture_start"))
+        assert session.start_pose_id is None
+        assert not session._start_library().exists()
+        assert not session._pose_file(rest=True).exists()
+        with pytest.raises(WorkflowError, match="Save a rest pose"):
+            session._command(Command(action="park"))
+        session._command(Command(action="save_start", pose_label="Original start"))
         first = session.start_pose_id
         expected = session.start_pose
         assert session._snapshot()["at_start"]
         assert session.power.state == "off"
         session.robot.teach({**session.pose, "shoulder_pan": 12.0})
         session._command(Command(action="capture_start"))
+        assert session.start_pose_id is None
+        assert set(session.saved_starts) == {first}
+        session._command(Command(action="save_start", pose_label="Alternate start"))
         second = session.start_pose_id
         assert second != first
 
@@ -479,14 +492,22 @@ def test_current_and_saved_poses_are_selectable_without_a_rest_pose(tmp_path):
         session._command(Command(action="disconnect"))
         session._command(Command(action="connect"))
         assert session._snapshot()["start_pose"] is None
-        assert {first, second} <= {p["id"] for p in session._snapshot()["start_poses"]}
+        assert {p["id"]: p["label"] for p in session._snapshot()["start_poses"]} == {
+            first: "Original start", second: "Alternate start",
+        }
         session._command(Command(action="select_start", pose_id=second))
         assert session.start_pose["shoulder_pan"] == 12.0
+        with pytest.raises(WorkflowError, match="Confirm"):
+            session._command(Command(action="delete_start", pose_id=second))
+        session._command(Command(action="delete_start", pose_id=second, confirmed=True))
+        assert session.start_pose_id is None
+        assert session.start_pose["shoulder_pan"] == 12.0
+        assert not (session._start_library() / f"{second}.json").exists()
     finally:
         session._close_devices()
 
 
-def test_start_pose_library_includes_previous_start_and_rest(tmp_path):
+def test_previous_positions_remain_available_without_mixing_rest_into_start(tmp_path):
     session = Session(tmp_path)
     session.config = Configuration(cameras=[])
     session._command(Command(action="connect"))
@@ -495,12 +516,26 @@ def test_start_pose_library_includes_previous_start_and_rest(tmp_path):
         old_rest = {**session.pose, "shoulder_pan": -8.0}
         write_json(session._pose_file(), {"version": 1, "position": old_start})
         write_json(session._pose_file(rest=True), {"version": 1, "position": old_rest})
+        write_json(session._start_library() / "abcdef012345.json", {
+            "version": 1, "position": old_start, "created": "2026-11-23T00:00:00+00:00",
+        })
         session._command(Command(action="disconnect"))
         session._command(Command(action="connect"))
         assert session.start_pose is None
+        assert session._park_goal() == old_rest
+        assert set(session.saved_starts) == {"previous-start", "abcdef012345"}
+        assert all(saved.legacy for saved in session.saved_starts.values())
         session._command(Command(action="select_start", pose_id="previous-start"))
         assert session._reset_goal() == old_start
-        session._command(Command(action="select_start", pose_id="previous-rest"))
-        assert session._reset_goal() == old_rest
+        with pytest.raises(WorkflowError, match="Confirm changing"):
+            session._command(Command(action="capture_rest"))
+        assert session._park_goal() == old_rest
+        session._command(Command(action="capture_rest", confirmed=True))
+        assert session._park_goal() == session.robot.read()
+        assert session._reset_goal() == old_start
+        session._command(Command(action="clear_rest", confirmed=True))
+        assert not session._pose_file(rest=True).exists()
+        assert session._park_goal() is None
+        assert session._reset_goal() == old_start
     finally:
         session._close_devices()

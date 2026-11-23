@@ -34,9 +34,11 @@ The trace contains sequence numbers, presentation, arrival, and availability tim
 
 ## Teach and reset
 
-1. **Set a start pose.** Use **Use current position** to save the measured pose, or select a saved one. If the arm is away from the selected start, move it by hand with torque off or use **Return to start** with torque on. Teaching starts only when the pose matches. Saved poses and paths are tied to the robot ID and calibration.
+1. **Set a start pose.** **Use current position** sets a temporary start for this session, or you can select a saved start. Choose **Save this start for later** and give it a name only if you want to keep it. Earlier captures are grouped separately and can be deleted individually. If the arm is away from the selected start, move it by hand with torque off or use **Return to start** with torque on. Teaching starts only when the pose matches.
 2. **Teach the motion.** Support the arm and gripper when you release torque, then guide all six joints, including the gripper. Hold the arm still when you stop teaching so it can engage torque at the measured position. **Continue teaching** picks up at that endpoint without adding the pause to the path.
 3. **Restore the scene.** **Boomerang scene reset** retraces the taught motion and can restore object placement for reversible tasks. From the start pose it may move to the taught endpoint first. Clear the full route and check the result yourself. Otherwise, **Return to start** moves the arm but not the objects. **Manual reset → Hold & verify** lets you position both by hand.
+
+Under **Rest position**, use **Save current as rest** to keep a separate parking pose. It is never used as the task start. Saving or clearing rest does not move the arm, and GhostPath never parks automatically; use **Return to rest** only after emptying the gripper and clearing the full route. Start and rest saves are scoped to the robot ID and calibration. Taught paths still keep their own start and raw samples, without creating start-library entries.
 
 If the gripper slips on a rigid object, try **Episode options → Firm grip**. It adds a small extra closure to detected carries without changing the arm path. Carry detection uses joint readings, not images or contact sensing. You can also enable **Keyboard grip adjustment** for Boomerang: hold **C** to close or **O** to open, then release the key to ease back. A completed Boomerang saves those adjustments for replay without overwriting the raw teaching samples.
 

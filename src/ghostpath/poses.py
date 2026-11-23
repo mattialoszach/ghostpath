@@ -15,9 +15,12 @@ class SavedStart:
     label: str
     created: str
     position: Pose
+    legacy: bool = False
 
     def summary(self):
-        return {"id": self.id, "label": self.label, "created": self.created}
+        return {
+            "id": self.id, "label": self.label, "created": self.created, "legacy": self.legacy,
+        }
 
 
 def fingerprint(data: dict) -> str:
