@@ -111,6 +111,7 @@ class Session:
         self.record_origin: float | None = None
         self.record_index = 0
         self.record_candidate: Record | None = None
+        self.control_trace: list[Record] = []
         self.last_recorded_at = float("-inf")
         self.replay_path_started: float | None = None
         self.replay_timing: dict[str, float] | None = None
@@ -1082,6 +1083,7 @@ class Session:
             self.record_origin = None
             self.record_index = 0
             self.record_candidate = None
+            self.control_trace = []
             self.last_recorded_at = float("-inf")
             self.stopped_early = False
             self.scene_reversed = False
@@ -1147,9 +1149,11 @@ class Session:
         self.last_idle_read = now
         if self.phase == Phase.TEACHING and self.demo is not None:
             self._demo_pose(now)
-        before = time.monotonic()
+        read_started = time.monotonic()
         self.pose = self.robot.read()
-        stamp = (before + time.monotonic()) / 2
+        read_ended = time.monotonic()
+        encoder_read = (read_started, read_ended)
+        stamp = (read_started + read_ended) / 2
         if self.cameras:
             self.cameras.demo_pose = self.pose
         if now - self.last_torque_check > 0.27:
@@ -1171,7 +1175,9 @@ class Session:
                 assist.advance(stamp, dt, self.player.cursor)
             target, done = self.player.step(stamp, self.pose)
             self._assert_controller()
+            send_started = time.monotonic()
             sent = self.robot.send(target)
+            command_send = (send_started, time.monotonic())
             if assist:
                 cursor = (
                     self.player.goal_cursor
@@ -1189,8 +1195,14 @@ class Session:
                     0.0,
                     min(1.0, (self.player.cursor - self.player.path.prefix) / self.path.duration),
                 )
-                reference = self.player.motion.target if on_path else None
-                self._record(stamp, sent, reference=reference)
+                stage = "path" if on_path else "aligning"
+                if self.player.ended is not None:
+                    stage = "settling"
+                self._record(
+                    stamp, sent, reference=self.player.motion.target,
+                    encoder_read=encoder_read, command_send=command_send, stage=stage,
+                    path_cursor=self.player.cursor, replay_rate=self.player.rate,
+                )
                 if done:
                     path_start, settle_start = self.replay_path_started, self.player.ended
                     if path_start is not None and settle_start is not None:
@@ -1222,7 +1234,7 @@ class Session:
                         else "Start pose verified. Ready to teach."
                     )
         elif self.phase == Phase.MANUAL:
-            self._manual_tick(now, dt, stamp)
+            self._manual_tick(now, dt, stamp, encoder_read)
 
     def _start_manual(self, stamp: float, sent: Pose):
         self.robot.stream_profile(CONTROL)
@@ -1236,23 +1248,31 @@ class Session:
         self.jog_at = 0.0
         self.notice = "Ghost path complete. Keyboard control is ready. Recording continues."
 
-    def _manual_tick(self, now: float, dt: float, stamp: float):
+    def _manual_tick(self, now: float, dt: float, stamp: float, encoder_read: tuple[float, float]):
         self.motion.check_tracking(self.pose)
         enabled = any(self.axes.values()) and now - self.jog_at < 0.25
         self._assert_controller()
+        command_send = None
+        reference = None
         if enabled or self.jog_active:
             target = (
                 self.motion.step(self.axes, max(0.0001, dt), self.pose, precision=True)
                 if enabled
                 else self.motion.hold(self.pose)
             )
+            reference = target
             if self.manual_trim:
                 if enabled:
                     self.manual_trim.update(min(dt, 1 / CONTROL.fps), target, self.pose)
                 target = self.manual_trim.goal(target, self.motion)
+            send_started = time.monotonic()
             self.manual_goal = self.robot.send(target)
+            command_send = (send_started, time.monotonic())
         self.jog_active = enabled
-        self._record(stamp, self.manual_goal, manual=True)
+        self._record(
+            stamp, self.manual_goal, manual=True, reference=reference,
+            encoder_read=encoder_read, command_send=command_send, stage="manual",
+        )
         self.elapsed = stamp - self.record_origin
         if stamp - self.manual_started > 180:
             self._seal()
@@ -1268,7 +1288,10 @@ class Session:
         self.robot.teach(self.motion.clamp(pose))
 
     def _record(
-        self, stamp: float, sent: Pose, manual: bool = False, *, reference: Pose | None = None
+        self, stamp: float, sent: Pose, manual: bool = False, *, reference: Pose | None = None,
+        encoder_read: tuple[float, float] | None = None,
+        command_send: tuple[float, float] | None = None, stage: str = "",
+        path_cursor: float | None = None, replay_rate: float | None = None,
     ):
         if self.datasets.error:
             raise SafetyFault(self.datasets.error)
@@ -1276,7 +1299,12 @@ class Session:
             self.record_origin = stamp
         due = self.record_origin + self.record_index / self.config.fps
         prior = self.record_candidate
-        current = Record(stamp, self.pose, sent, manual, reference)
+        current = Record(
+            stamp, self.pose.copy(), sent.copy(), manual,
+            reference.copy() if reference is not None else None,
+            encoder_read, command_send, stage, path_cursor, replay_rate,
+        )
+        self.control_trace.append(current)
         self.record_candidate = current
         if stamp < due:
             return
@@ -1295,8 +1323,12 @@ class Session:
 
     def _seal(self, *, stopped: bool = False):
         self.stopped_early = stopped
+        trace, self.control_trace = self.control_trace, []
         self._begin_operation(
-            "seal", self.datasets.seal(stopped_early=stopped, replay_timing=self.replay_timing)
+            "seal", self.datasets.seal(
+                stopped_early=stopped, replay_timing=self.replay_timing,
+                control_trace=trace, control_fps=CONTROL.fps,
+            )
         )
         self.robot.stream_profile(CONTROL)
 
@@ -1329,6 +1361,7 @@ class Session:
                     LOG.exception("Could not save interrupted teaching samples")
             self._clear_teaching()
         self.player = None
+        self.control_trace.clear()
         if not keep_take:
             if self.datasets and not self.datasets.broken:
                 self.operation = ("cleanup", self.datasets.discard())

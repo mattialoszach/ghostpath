@@ -42,10 +42,13 @@ export interface Quality {
   max_gap_ms: number
   camera_skew_ms: number
   skipped_camera_samples?: number
+  discontinuities?: number[]
   sensor_offset_ms: number
+  camera_offset_ms?: Record<string, { p1: number; p50: number; p95: number; p99: number }>
   max_arm_error_deg: number
   max_gripper_error_pct: number
   max_arm_path_error_deg?: number | null
+  arm_path_peak?: { joint: Joint; seconds: number; excursion_deg?: number; excursion_ms?: number } | null
   max_gripper_path_error_pct?: number | null
   replay_timing?: {
     alignment_seconds: number

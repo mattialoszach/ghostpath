@@ -46,6 +46,7 @@ def test_official_v3_roundtrip_discard_and_failed_save(writer, monkeypatch):
     assert quality["capture_span_seconds"] == 0.333
     assert quality["max_arm_error_deg"] == 10
     assert quality["max_arm_path_error_deg"] == 2
+    assert quality["arm_path_peak"] == {"joint": "shoulder_pan", "seconds": 0}
     assert quality["max_gripper_path_error_pct"] == 2
     assert writer.review("front", 0).startswith(b"\xff\xd8")
     assert writer.review("preview", 0) is None
@@ -98,6 +99,21 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     assert writer.accepted == 0
 
 
+def test_rejects_video_and_telemetry_frame_count_mismatch(writer, monkeypatch):
+    stage(writer)
+    save_episode = writer.dataset.save_episode
+
+    def save_with_mismatch(**kwargs):
+        save_episode(**kwargs)
+        writer.frames += 1
+
+    monkeypatch.setattr(writer.dataset, "save_episode", save_with_mismatch)
+    with pytest.raises(RuntimeError, match="encoder lost video frames"):
+        writer.save("invalid", "teach").result(timeout=30)
+    assert not writer._output_files()
+    assert not (writer.root / "ghostpath.json").exists()
+
+
 @pytest.fixture
 def physical_writer(tmp_path):
     pytest.importorskip("lerobot.datasets.lerobot_dataset")
@@ -129,24 +145,19 @@ def load_camera_history(store, stamp, streams):
     [
         (
             {"workspace": [-0.024, 0.038, 0.080, 0.120], "wrist": [-0.041, 0.025, 0.072, 0.112]},
-            [(0.038, 0.025), (0.080, 0.072), (0.120, 0.112)],
-            13.0,
-        ),
-        (
-            {"workspace": [-0.023, 0.007, 0.110, 0.150], "wrist": [-0.029, 0.007, 0.115, 0.151]},
-            [(-0.023, -0.029), (0.007, 0.007), (0.110, 0.115)],
-            6.0,
+            [(-0.024, -0.041), (0.038, 0.025), (0.080, 0.072)],
+            17.0,
         ),
         (
             {
                 "workspace": [-0.017, 0.016, 0.049, 0.082, 0.115],
-                "wrist": [-0.015, 0.018, 0.051, 0.084, 0.117],
+                "wrist": [-0.015, 0.013, 0.051, 0.084, 0.117],
             },
-            [(-0.017, -0.015), (0.049, 0.051), (0.115, 0.117)],
-            2.0,
+            [(-0.017, -0.015), (0.016, 0.013), (0.082, 0.084)],
+            3.0,
         ),
     ],
-    ids=["joint-skew", "reserve-next-sample", "avoid-mixing-camera-intervals"],
+    ids=["causal-skew", "avoid-mixing-camera-intervals"],
 )
 def test_joint_pairing_saves_episode_with_distinct_frames(physical_writer, streams, expected, skew):
     module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
@@ -167,6 +178,8 @@ def test_joint_pairing_saves_episode_with_distinct_frames(physical_writer, strea
     assert dataset.num_frames == 3
     for row, timestamps in zip(dataset, expected, strict=True):
         assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx(timestamps)
+        cutoff = row["ghostpath.encoder_read"][1]
+        assert row["ghostpath.camera_available_timestamps"].max() <= cutoff
 
 
 def test_isolated_wrist_gap_is_reported_and_keeps_actual_camera_and_robot_times(physical_writer):
@@ -188,12 +201,15 @@ def test_isolated_wrist_gap_is_reported_and_keeps_actual_camera_and_robot_times(
     store.finalize().result(timeout=30)
     manifest = json.loads((store.root / "ghostpath.json").read_text())
     assert manifest["episodes"][0]["skipped_camera_samples"] == 1
+    assert manifest["episodes"][0]["discontinuities"] == [2]
 
     dataset = module.LeRobotDataset(store.repo_id, root=store.root, video_backend="pyav")
     assert dataset.num_frames == 4
     for row, actual in zip(dataset, [0, 0.05, 0.15, 0.20], strict=True):
         assert row["ghostpath.actual_timestamp"].item() == pytest.approx(actual)
         assert row["ghostpath.camera_timestamps"].tolist() == pytest.approx([actual, actual])
+    assert [row["ghostpath.sample_index"].item() for row in dataset] == [0, 1, 3, 4]
+    assert [row["ghostpath.segment_index"].item() for row in dataset] == [0, 0, 1, 1]
 
 
 def test_repeated_wrist_gaps_reject_the_take(physical_writer):

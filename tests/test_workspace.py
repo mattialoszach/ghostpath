@@ -373,6 +373,18 @@ def test_replay_records_initial_alignment_and_manual_handoff(
     entries = json.loads((root / "ghostpath.json").read_text())["episodes"]
     assert entries[0]["manual_finish"]
     assert entries[0]["replay_timing"] == timing
+    control = json.loads((root / entries[0]["control_trace"]).read_text())
+    ticks = control["ticks"]
+    assert control["nominal_hz"] == CONTROL.fps
+    assert len(ticks) > dataset.num_frames
+    assert {tick["stage"] for tick in ticks} >= {"path", "settling", "manual"}
+    assert all(
+        tick["encoder_read"][0] <= tick["timestamp"] <= tick["encoder_read"][1] for tick in ticks
+    )
+    sent = [tick for tick in ticks if tick["command_send"] is not None]
+    assert sent
+    assert all(tick["encoder_read"][1] <= tick["command_send"][0] for tick in sent)
+    assert any(tick["replay_rate"] is not None and tick["reference"] for tick in ticks)
 
 
 @pytest.mark.parametrize("legacy_timing", [True, False])

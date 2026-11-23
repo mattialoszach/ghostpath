@@ -328,6 +328,7 @@ export function ReviewMetrics({ state }: { state: State }) {
       <div><span>Frames at {state.config.fps} FPS</span><strong>{quality.frames}</strong></div>
       <div><span>Dataset duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
     </div>
+    {!!quality.discontinuities?.length && <p className="hint">This take has camera gaps. Exclude it from training unless your loader respects segment boundaries.</p>}
     <details className="episode-options">
       <summary><ChevronDown size={14} /> Capture and tracking details</summary>
       <div>
@@ -336,7 +337,7 @@ export function ReviewMetrics({ state }: { state: State }) {
             <div><span>Teaching time</span><strong>{state.path.teaching_duration.toFixed(2)} s</strong></div>
             <div><span>Planned path time</span><strong>{state.path.duration.toFixed(2)} s</strong></div>
           </>}
-          {quality.max_arm_path_error_deg != null && <div><span>Peak arm path error</span><strong>{quality.max_arm_path_error_deg}°</strong></div>}
+          {quality.max_arm_path_error_deg != null && <div><span>Peak arm path error{quality.arm_path_peak && ` · ${jointLabels[quality.arm_path_peak.joint]} at ${quality.arm_path_peak.seconds.toFixed(2)} s`}</span><strong>{quality.max_arm_path_error_deg}°</strong></div>}
           {quality.max_gripper_path_error_pct != null && <div><span>Peak gripper path error</span><strong>{quality.max_gripper_path_error_pct}%</strong></div>}
           {cameraCount > 0 && quality.skipped_camera_samples != null && <div><span>Skipped camera samples</span><strong>{quality.skipped_camera_samples}</strong></div>}
           {quality.capture_span_seconds != null && <div><span>First to last saved frame</span><strong>{quality.capture_span_seconds.toFixed(2)} s</strong></div>}
@@ -351,7 +352,9 @@ export function ReviewMetrics({ state }: { state: State }) {
           <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
           <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
         </div>
-        <p className="hint">The nominal frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Camera timing uses frame arrival times on this computer.'}</p>
+        <p className="hint">The nominal frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Timing uses camera presentation timestamps on macOS and host read times elsewhere. Neither is a hardware exposure measurement.'}</p>
+        {Object.entries(quality.camera_offset_ms ?? {}).map(([name, offsets]) => <p key={name} className="hint">{humanize(name)}: median {offsets.p50} ms relative to the encoder read midpoint (p1 {offsets.p1} ms, p95 {offsets.p95} ms, p99 {offsets.p99} ms).</p>)}
+        {quality.arm_path_peak?.excursion_ms != null && <p className="hint">Around the peak, {jointLabels[quality.arm_path_peak.joint]} was at least {quality.arm_path_peak.excursion_deg}° off the reference for {quality.arm_path_peak.excursion_ms > 0 ? `${quality.arm_path_peak.excursion_ms} ms` : 'one control tick'}.</p>}
         {quality.max_arm_path_error_deg != null && <p className="hint">Path error compares encoder readings with the replay reference at the same sample time. Servo commands can aim ahead of that reference.</p>}
       </div>
     </details>

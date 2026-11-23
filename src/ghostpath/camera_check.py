@@ -48,15 +48,19 @@ def main():
             time.sleep(0.05)
 
         start = time.monotonic()
-        while time.monotonic() < start + args.seconds:
+        finish = start + args.seconds
+        while True:
             for name, camera in cameras.captures.items():
                 with camera.condition:
                     frames[name].update(
                         (frame.sequence, (frame.timestamp, frame.arrived, frame.available))
                         for frame in camera.history
-                        if start <= frame.available < start + args.seconds
+                        if start <= frame.available < finish
                     )
-            time.sleep(0.05)
+            remaining = finish - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
         statuses = cameras.status()
     finally:
         cameras.close()
@@ -72,6 +76,7 @@ def main():
                 gap_p95_ms=round(float(np.percentile(gaps, 95) * 1000), 1),
                 max_gap_ms=round(float(gaps.max() * 1000), 1),
                 gaps_over_1_5_periods=int(np.sum(gaps > 1.5 / args.fps)),
+                max_availability_gap_ms=round(float(np.diff(available).max() * 1000), 1),
                 timestamp_to_arrival_p95_ms=round(
                     float(np.percentile(arrivals - stamps, 95) * 1000), 1
                 ),

@@ -49,8 +49,8 @@ def test_macos_source_stays_bound_to_physical_camera():
 @pytest.mark.parametrize(
     ("after", "error"),
     [
-        ({}, r"skew is too high for the 45 ms limit.*workspace -40.0 ms, wrist \+43.0 ms"),
-        ({"workspace": 0}, r"workspace: no unused camera frame within 45 ms"),
+        ({}, r"skew exceeds 35 ms"),
+        ({"workspace": 0}, r"workspace: no fresh, unused camera frame"),
     ],
 )
 def test_pairing_rejects_excess_skew_or_a_reused_frame(after, error):
@@ -60,10 +60,34 @@ def test_pairing_rejects_excess_skew_or_a_reused_frame(after, error):
     )
     stamp = monotonic() - 1
     image = np.zeros((480, 640, 3), dtype=np.uint8)
-    for name, offset in (("workspace", -0.040), ("wrist", 0.043)):
+    for name, offset in (("workspace", -0.080), ("wrist", -0.010)):
         manager.captures[name].history.append(cameras.CameraFrame(0, stamp + offset, image))
     with pytest.raises(ValueError, match=error):
-        manager.frames(stamp, {}, 0.05, after)
+        manager.frames(stamp, {}, after)
+
+
+def test_pairing_cannot_see_frames_that_were_not_yet_available():
+    manager = cameras.Cameras([CameraSpec(name="workspace", source=0)], simulation=False)
+    stamp = monotonic()
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    history = manager.captures["workspace"].history
+    history.append(cameras.CameraFrame(0, stamp - 0.06, image, stamp - 0.01, stamp - 0.005))
+    history.append(cameras.CameraFrame(1, stamp - 0.03, image, stamp - 0.002, stamp + 0.005))
+    history.append(cameras.CameraFrame(2, stamp + 0.01, image, stamp + 0.02, stamp + 0.03))
+    assert [frame.sequence for frame in manager.frames(stamp, {}, {})] == [0]
+    assert [frame.sequence for frame in manager.frames(stamp + 0.006, {}, {"workspace": 0})] == [1]
+
+
+def test_avfoundation_pairs_at_a_stable_input_delay():
+    manager = cameras.Cameras([CameraSpec(name="workspace", source=0)], simulation=False)
+    stamp = monotonic()
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    capture = manager.captures["workspace"]
+    capture.mode = {"timestamp_source": "avfoundation_pts"}
+    capture.history.append(cameras.CameraFrame(0, stamp - 0.11, image, stamp - 0.03))
+    capture.history.append(cameras.CameraFrame(1, stamp - 0.08, image, stamp - 0.01))
+    hits = manager.frames(stamp + 0.025, {}, {}, scheduled=stamp)
+    assert [frame.sequence for frame in hits] == [0]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Requires inherited Unix sockets")
@@ -93,9 +117,7 @@ def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
         wait_for(lambda: capture.status()["retrying"])
         assert capture.live_preview() is None
         with pytest.raises(ValueError, match="stopped delivering frames"):
-            capture.candidates(
-                first.timestamp, -1, 0.1, through=first.timestamp, deadline=first.timestamp
-            )
+            capture.candidates(first.timestamp, -1)
 
         wait_for(lambda: len(workers) >= 2 and capture.live_preview() is not None)
         assert workers[0].poll() is not None

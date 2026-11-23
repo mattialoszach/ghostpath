@@ -13,12 +13,13 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import CameraFrame, Cameras, CameraSyncError, jpeg
+from .cameras import AVFOUNDATION_BUFFER, MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
 
 MIN_CAMERA_GAP_INTERVAL = 2.0
+ARM_EXCURSION_DEG = 3.0
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,15 @@ class Record:
     action: Pose
     manual: bool
     reference: Pose | None = None
+    encoder_read: tuple[float, float] | None = None
+    command_send: tuple[float, float] | None = None
+    stage: str = ""
+    path_cursor: float | None = None
+    replay_rate: float | None = None
+
+    @property
+    def cutoff(self) -> float:
+        return self.encoder_read[1] if self.encoder_read is not None else self.timestamp
 
 
 def _feature(dtype: str, names: list[str]) -> dict:
@@ -71,8 +81,13 @@ class Datasets:
         self.max_arm_path_error = self.max_gripper_path_error = 0.0
         self.replay_timing: dict[str, float] | None = None
         self.indices: dict[str, int] = {}
-        self.pending_record: Record | None = None
-        self.reserved_frames: list[CameraFrame] | None = None
+        self.camera_modes: dict = {}
+        self.camera_offsets: dict[str, list[float]] = {}
+        self.discontinuities: list[int] = []
+        self.last_saved_index = -1
+        self.arm_path_peak: dict | None = None
+        self.control_trace: list[Record] = []
+        self.control_fps: int | None = None
         self.saved: list[dict] = []
 
     def prepare(self) -> Future:
@@ -81,7 +96,7 @@ class Datasets:
     def _prepare(self):
         if self.broken:
             raise RuntimeError("The dataset writer failed. Disconnect and choose a new dataset.")
-        self.cameras.check_recording(self.config.fps)
+        modes = self.cameras.check_recording(self.config.fps)
         if self.dataset is None:
             LeRobotDataset, RGBEncoderConfig = load_dataset_backend()
             encoder = RGBEncoderConfig(vcodec="h264", preset="veryfast", crf=19, g=30)
@@ -92,10 +107,14 @@ class Datasets:
                     rgb_encoder=encoder,
                     video_backend="pyav",
                     encoder_threads=2,
+                    streaming_encoding=True,
+                    encoder_queue_maxsize=8,
                 )
             else:
                 self._create(LeRobotDataset, encoder)
         self._clear()
+        self.camera_modes = modes
+        self.camera_offsets = {spec.name: [] for spec in self.cameras.recorded}
         self.review_dir = TemporaryDirectory(prefix="ghostpath-review-")
 
     def _create(self, dataset_class, encoder):
@@ -107,12 +126,20 @@ class Datasets:
             "observation.state": _feature("float32", motor_features),
             "action": _feature("float32", motor_features),
             "ghostpath.actual_timestamp": _feature("float64", ["seconds"]),
+            "ghostpath.encoder_read": _feature("float64", ["start_seconds", "end_seconds"]),
+            "ghostpath.sample_index": _feature("int64", ["index"]),
+            "ghostpath.segment_index": _feature("int64", ["index"]),
             "ghostpath.manual": _feature("bool", ["manual"]),
         }
         if self.cameras.recorded:
-            features["ghostpath.camera_timestamps"] = _feature(
-                "float64", [s.name for s in self.cameras.recorded]
-            )
+            for key in (
+                "camera_timestamps",
+                "camera_arrival_timestamps",
+                "camera_available_timestamps",
+            ):
+                features[f"ghostpath.{key}"] = _feature(
+                    "float64", [spec.name for spec in self.cameras.recorded]
+                )
         for spec in self.cameras.recorded:
             features[f"observation.images.{spec.name}"] = {
                 "dtype": "video",
@@ -129,6 +156,8 @@ class Datasets:
             rgb_encoder=encoder,
             video_backend="pyav",
             encoder_threads=2,
+            streaming_encoding=True,
+            encoder_queue_maxsize=8,
         )
         self.created = True
 
@@ -141,24 +170,14 @@ class Datasets:
 
     def _consume(self, record: Record):
         try:
-            if self.cameras.recorded and not self.cameras.simulation:
-                pending = self.pending_record
-                self.pending_record = record
-                if pending is not None:
-                    self._store(pending, next_timestamp=record.timestamp)
-            else:
-                self._store(record)
+            if not self.error:
+                self._add(record)
+        except Exception as exc:
+            self.error = f"Capture validation failed: {exc}"
         finally:
             self.slots.release()
 
-    def _store(self, record: Record, *, next_timestamp: float | None = None):
-        if not self.error:
-            try:
-                self._add(record, next_timestamp=next_timestamp)
-            except Exception as exc:
-                self.error = f"Capture validation failed: {exc}"
-
-    def _add(self, record: Record, *, next_timestamp: float | None = None):
+    def _add(self, record: Record):
         period = 1 / self.config.fps
         stamp = record.timestamp
         if not math.isfinite(stamp):
@@ -173,19 +192,14 @@ class Datasets:
         self.last_sample = stamp
         self.samples += 1
         state, action = validate_pose(record.state), validate_pose(record.action)
-        if next_timestamp is not None and not 0 < next_timestamp - stamp <= period * 1.8:
-            next_timestamp = None
         try:
-            captures, self.reserved_frames = self.cameras.frames(
-                stamp,
+            captures = self.cameras.frames(
+                record.cutoff,
                 state,
-                period,
                 self.indices,
-                next_timestamp=next_timestamp,
-                reserved=self.reserved_frames,
+                scheduled=self.started + (self.samples - 1) * period,
             )
         except CameraSyncError as exc:
-            self.reserved_frames = None
             if (
                 self.last_camera_gap is not None
                 and stamp - self.last_camera_gap < MIN_CAMERA_GAP_INTERVAL
@@ -195,10 +209,14 @@ class Datasets:
             self.skipped_camera_samples += 1
             return
 
+        sample_index = self.samples - 1
         if self.frames:
             self.max_gap = max(self.max_gap, stamp - self.last_saved)
+            if sample_index != self.last_saved_index + 1:
+                self.discontinuities.append(self.frames)
         else:
             self.first_saved = stamp
+        self.last_saved_index = sample_index
         self.last_saved = stamp
         self.max_arm_error = max(
             self.max_arm_error, *(abs(action[j] - state[j]) for j in JOINTS[:-1])
@@ -208,18 +226,27 @@ class Datasets:
         )
         if record.reference is not None:
             reference = validate_pose(record.reference)
-            self.path_frames += 1
-            self.max_arm_path_error = max(
-                self.max_arm_path_error, *(abs(reference[j] - state[j]) for j in JOINTS[:-1])
-            )
-            self.max_gripper_path_error = max(
-                self.max_gripper_path_error, abs(reference["gripper"] - state["gripper"])
-            )
+            if self._on_path(record):
+                self.path_frames += 1
+                joint = max(JOINTS[:-1], key=lambda joint: abs(reference[joint] - state[joint]))
+                error = abs(reference[joint] - state[joint])
+                if self.arm_path_peak is None or error > self.max_arm_path_error:
+                    self.max_arm_path_error = error
+                    self.arm_path_peak = {"joint": joint, "seconds": round(stamp - self.started, 3)}
+                self.max_gripper_path_error = max(
+                    self.max_gripper_path_error, abs(reference["gripper"] - state["gripper"])
+                )
         frame = {
             "task": self.config.task.strip(),
             "observation.state": np.array(list(state.values()), np.float32),
             "action": np.array(list(action.values()), np.float32),
             "ghostpath.actual_timestamp": np.array([stamp - self.started], np.float64),
+            "ghostpath.encoder_read": np.array(
+                [time - self.started for time in (record.encoder_read or (stamp, stamp))],
+                np.float64,
+            ),
+            "ghostpath.sample_index": np.array([sample_index], np.int64),
+            "ghostpath.segment_index": np.array([len(self.discontinuities)], np.int64),
             "ghostpath.manual": np.array([record.manual], np.bool_),
         }
         times = []
@@ -227,6 +254,7 @@ class Datasets:
         review_interval = max(1, round(self.config.fps / 5))
         for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
+            self.camera_offsets[spec.name].append((capture.timestamp - stamp) * 1000)
             if capture.pixels.shape != (spec.height, spec.width, 3):
                 raise ValueError(f"{spec.name}: unexpected frame dimensions")
             if capture.pixels.dtype != np.uint8:
@@ -241,6 +269,12 @@ class Datasets:
             frame["ghostpath.camera_timestamps"] = np.array(
                 [t - self.started for t in times], np.float64
             )
+            frame["ghostpath.camera_arrival_timestamps"] = np.array(
+                [capture.arrived - self.started for capture in captures], np.float64
+            )
+            frame["ghostpath.camera_available_timestamps"] = np.array(
+                [capture.available - self.started for capture in captures], np.float64
+            )
         self.dataset.add_frame(frame)
         self.indices.update(
             (spec.name, capture.sequence)
@@ -254,17 +288,58 @@ class Datasets:
         self.frames += 1
 
     def seal(
-        self, *, stopped_early: bool = False, replay_timing: dict[str, float] | None = None
+        self,
+        *,
+        stopped_early: bool = False,
+        replay_timing: dict[str, float] | None = None,
+        control_trace: list[Record] | None = None,
+        control_fps: int | None = None,
     ) -> Future:
-        return self.executor.submit(self._seal, stopped_early, replay_timing)
+        return self.executor.submit(
+            self._seal, stopped_early, replay_timing, control_trace, control_fps
+        )
 
-    def _seal(self, stopped_early: bool, replay_timing: dict[str, float] | None) -> dict:
-        if self.pending_record is not None:
-            pending, self.pending_record = self.pending_record, None
-            self._store(pending)
+    def _seal(self, stopped_early, replay_timing, control_trace, control_fps) -> dict:
         self.stopped_early = stopped_early
         self.replay_timing = replay_timing
+        self.control_trace = control_trace or []
+        self.control_fps = control_fps
+        if self.control_trace:
+            self._summarize_tracking()
         return self._validate()
+
+    @staticmethod
+    def _on_path(tick: Record) -> bool:
+        return tick.reference is not None and not tick.manual and tick.stage != "aligning"
+
+    def _summarize_tracking(self):
+        ticks = [tick for tick in self.control_trace if self._on_path(tick)]
+        if not ticks:
+            return
+        error = np.abs(
+            np.array(
+                [[tick.reference[joint] - tick.state[joint] for joint in JOINTS] for tick in ticks]
+            )
+        )
+        arm = error[:, :-1]
+        row, column = np.unravel_index(arm.argmax(), arm.shape)
+        self.max_arm_path_error = peak = float(arm[row, column])
+        self.max_gripper_path_error = float(error[:, -1].max())
+        self.path_frames = len(ticks)
+        self.arm_path_peak = {
+            "joint": JOINTS[column],
+            "seconds": round(ticks[row].timestamp - self.started, 3),
+        }
+        if peak >= ARM_EXCURSION_DEG:
+            first = last = row
+            while first > 0 and arm[first - 1, column] >= ARM_EXCURSION_DEG:
+                first -= 1
+            while last + 1 < len(ticks) and arm[last + 1, column] >= ARM_EXCURSION_DEG:
+                last += 1
+            self.arm_path_peak.update(
+                excursion_deg=ARM_EXCURSION_DEG,
+                excursion_ms=round((ticks[last].timestamp - ticks[first].timestamp) * 1000, 1),
+            )
 
     def _validate(self) -> dict:
         if self.error:
@@ -279,12 +354,24 @@ class Datasets:
             "max_gap_ms": round(self.max_gap * 1000, 1),
             "camera_skew_ms": round(self.max_skew * 1000, 1),
             "skipped_camera_samples": self.skipped_camera_samples,
+            "discontinuities": self.discontinuities,
+            "camera_offset_ms": {
+                name: {
+                    f"p{p}": round(float(value), 1)
+                    for p, value in zip(
+                        (1, 50, 95, 99), np.percentile(offsets, (1, 50, 95, 99)), strict=True
+                    )
+                }
+                for name, offsets in self.camera_offsets.items()
+                if offsets
+            },
             "sensor_offset_ms": round(self.max_sensor_offset * 1000, 1),
             "max_arm_error_deg": round(self.max_arm_error, 2),
             "max_gripper_error_pct": round(self.max_gripper_error, 2),
             "max_arm_path_error_deg": (
                 round(self.max_arm_path_error, 2) if self.path_frames else None
             ),
+            "arm_path_peak": self.arm_path_peak,
             "max_gripper_path_error_pct": (
                 round(self.max_gripper_path_error, 2) if self.path_frames else None
             ),
@@ -305,9 +392,13 @@ class Datasets:
             "mode": mode,
             "manual_finish": manual_finish,
             "firm_carry_grip": firm_carry_grip,
+            "cameras": self.camera_modes,
             **quality,
         }
         accepted_before = self._output_files()
+        trace_path = self.root / "control" / f"episode-{self.accepted:06d}.json"
+        if self.control_trace:
+            record["control_trace"] = trace_path.relative_to(self.root).as_posix()
         dataset = self.dataset
         # A resumed v3 writer starts new Parquet and video files. Keep the existing
         # metadata so an encoder or disk error cannot append a partial episode.
@@ -319,11 +410,19 @@ class Datasets:
                 dataset.finalize()
                 if dataset.meta.total_episodes != self.accepted + 1:
                     raise RuntimeError("LeRobot did not commit the expected episode index.")
+                self._verify_videos(self._output_files() - accepted_before)
+                if self.control_trace:
+                    self._write_control(trace_path)
                 write_json(
                     self.root / "ghostpath.json",
                     {
-                        "version": 1,
+                        "version": 2,
                         "config": self.config.model_dump(mode="json"),
+                        "observation_policy": {
+                            "cutoff": "encoder_read_end",
+                            "avfoundation_buffer_seconds": AVFOUNDATION_BUFFER,
+                            "max_frame_age_seconds": MAX_FRAME_AGE,
+                        },
                         "episodes": [*self.saved, record],
                     },
                 )
@@ -335,6 +434,7 @@ class Datasets:
                 # flush a partially written episode over the restored metadata.
                 del dataset
                 try:
+                    trace_path.unlink(missing_ok=True)
                     for file in self._output_files() - accepted_before:
                         file.unlink()
                     shutil.rmtree(self.root / "meta")
@@ -348,8 +448,52 @@ class Datasets:
         self.dataset = None
         self.accepted += 1
         self.saved.append(record)
+        self.control_trace = []
         self._clean_review()
         self.frames = 0
+
+    def _verify_videos(self, new_files: set[Path]):
+        if not self.cameras.recorded:
+            return
+        import av
+
+        videos = [path for path in new_files if path.suffix == ".mp4"]
+        if len(videos) != len(self.cameras.recorded):
+            raise RuntimeError("The encoder did not save a video for every recorded camera.")
+        for path in videos:
+            with av.open(str(path)) as container:
+                if container.streams.video[0].frames != self.frames:
+                    raise RuntimeError(
+                        "The encoder lost video frames. Lower camera resolution or dataset FPS."
+                    )
+
+    def _write_control(self, path: Path):
+        def relative(window):
+            return [stamp - self.started for stamp in window] if window is not None else None
+
+        write_json(
+            path,
+            {
+                "joint_order": JOINTS,
+                "nominal_hz": self.control_fps,
+                "ticks": [
+                    {
+                        "timestamp": tick.timestamp - self.started,
+                        "encoder_read": relative(tick.encoder_read),
+                        "command_send": relative(tick.command_send),
+                        "stage": tick.stage,
+                        "path_cursor": tick.path_cursor,
+                        "replay_rate": tick.replay_rate,
+                        "state": [tick.state[joint] for joint in JOINTS],
+                        "action": [tick.action[joint] for joint in JOINTS],
+                        "reference": (
+                            [tick.reference[joint] for joint in JOINTS] if tick.reference else None
+                        ),
+                    }
+                    for tick in self.control_trace
+                ],
+            },
+        )
 
     def _output_files(self) -> set[Path]:
         return {
@@ -376,7 +520,13 @@ class Datasets:
         self.error = None
         self.frames = 0
         self.indices.clear()
-        self.pending_record = self.reserved_frames = None
+        self.camera_modes = {}
+        self.camera_offsets = {}
+        self.discontinuities = []
+        self.last_saved_index = -1
+        self.arm_path_peak = None
+        self.control_trace = []
+        self.control_fps = None
         self.samples = self.skipped_camera_samples = 0
         self.started = self.last_sample = self.first_saved = self.last_saved = 0.0
         self.last_camera_gap = None
