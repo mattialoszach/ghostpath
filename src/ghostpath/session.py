@@ -28,7 +28,6 @@ from .trajectory import (
     MAX_TEACH_SECONDS,
     START_TOLERANCE,
     AlignedPath,
-    LoadTrim,
     NativePlayer,
     Player,
     ReplayPath,
@@ -56,6 +55,7 @@ CONTROL = Settings(
     max_lead=6,
     gripper_max_lead=9,
 )
+MANUAL_JOG = replace(CONTROL, speed=12.5, gripper_speed=12, park_speed=12.5)
 FAST_REPLAY = replace(
     CONTROL, speed=120, acceleration=360, gripper_speed=100, gripper_acceleration=400
 )
@@ -125,7 +125,6 @@ class Session:
         self.takeover_requested = False
         self.manual_takeover_seconds: float | None = None
         self.manual_goal: Pose | None = None
-        self.manual_trim: LoadTrim | None = None
         self.heartbeat_at = time.monotonic()
         self.last_tick = self.heartbeat_at
         self.pending: Queue[tuple[Command, Future]] = Queue(maxsize=24)
@@ -415,6 +414,7 @@ class Session:
         elif action == "finish_practice":
             self._require(Phase.PRACTICE)
             self.robot.hold()
+            self.robot.stream_profile(CONTROL)
             self._clear_jog()
             self.phase = Phase.READY
             self.notice = "Practice ended. The arm is holding its current position."
@@ -1329,15 +1329,15 @@ class Session:
         self.jog_active = self.jog_hard_stop = False
 
     def _start_manual(self, stamp: float, sent: Pose, *, practice: bool = False):
-        self.robot.stream_profile(CONTROL)
+        self.robot.stream_profile(MANUAL_JOG)
         self._assert_controller()
+        self.motion = Motion(sent, self.robot.limits, MANUAL_JOG)
+        self.last_tick = time.monotonic()
         self.phase = Phase.PRACTICE if practice else Phase.MANUAL
         self.player = None
         self.grip_assist = None
         self.takeover_requested = False
         self.manual_started = stamp
-        nominal = self.motion.hold(self._servo_origin(sent))
-        self.manual_trim = LoadTrim(nominal, sent) if isinstance(self.robot, Follower) else None
         self.manual_goal = sent
         self._clear_jog()
         if practice:
@@ -1357,20 +1357,13 @@ class Session:
         command_send = None
         reference = self.motion.target
         if enabled or self.jog_active:
-            target = (
+            reference = (
                 self.motion.hold(self.pose) if hard_stop
-                else self.motion.step(self.axes, max(0.0001, dt), self.pose, precision=True)
+                else self.motion.step(self.axes, max(0.0001, dt), self.pose)
             )
-            reference = target
-            if self.manual_trim and not hard_stop:
-                if enabled:
-                    self.manual_trim.update(min(dt, 1 / CONTROL.fps), target, self.pose)
-                target = self.manual_trim.goal(target, self.motion)
             send_started = time.monotonic()
-            self.manual_goal = self.robot.send(target)
+            self.manual_goal = self.robot.send(reference, force=hard_stop)
             command_send = (send_started, time.monotonic())
-            if hard_stop and self.manual_trim:
-                self.manual_trim = LoadTrim(reference, self.manual_goal)
         if hard_stop:
             self._clear_jog()
         else:

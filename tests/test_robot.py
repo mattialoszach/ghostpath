@@ -1,10 +1,12 @@
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
 
+from ghostpath.models import Command
 from ghostpath.motion import JOINTS, SafetyFault
 from ghostpath.robot import Follower
-from ghostpath.session import CONTROL, FAST_REPLAY
+from ghostpath.session import CONTROL, FAST_REPLAY, Session
 
 
 class Bus:
@@ -145,3 +147,47 @@ def test_fast_profile_is_verified_and_restores_standard_registers(rig, monkeypat
     monkeypatch.setattr(bus, "sync_write", write)
     arm.stream_profile(FAST_REPLAY)
     assert all(bus.reg["Goal_Speed"][j] > standard["Goal_Speed"][j] for j in JOINTS)
+
+
+def test_manual_jog_keeps_idle_goals_fixed_under_varying_load(rig, tmp_path):
+    arm, bus = rig
+    arm.arm()
+    driven, loaded = "shoulder_pan", "elbow_flex"
+    held = arm.last_raw_goal.copy()
+    bus.reg["Present_Position"][loaded] = held[loaded] - 22
+    observed, latched = arm.motion_start()
+    session = Session(tmp_path)
+    session.robot, session.pose = arm, observed
+    session._start_manual(monotonic(), latched, practice=True)
+    session._command(Command(action="jog", axes={driven: 1}))
+    started, period = session.jog_at, 1 / CONTROL.fps
+    bus.calls.clear()
+
+    for tick in range(1, CONTROL.fps + 1):
+        now = started + tick * period
+        if tick % 5 == 0:
+            session.jog_at = now
+        bus.reg["Present_Position"][driven] = arm.last_raw_goal[driven]
+        bus.reg["Present_Position"][loaded] = held[loaded] - 42 + (-1) ** tick * 8
+        session.pose = arm.read()
+        session.heartbeat()
+        session._manual_tick(now, period, now, (now, now))
+
+    goal_writes = [goals for register, goals in bus.calls if register == "Goal_Position"]
+    assert goal_writes and all(set(goals) == {driven} for goals in goal_writes)
+    driven_goals = [goals[driven] for goals in goal_writes]
+    assert driven_goals == sorted(set(driven_goals))
+    assert bus.reg["Goal_Position"][loaded] == held[loaded]
+
+    for joint in JOINTS:
+        nominal_rate = session.motion.settings.velocity(joint)
+        assert bus.reg["Goal_Speed"][joint] == int(nominal_rate * arm._steps_per_unit(joint))
+    assert session.motion.velocity[driven] == pytest.approx(12.5, abs=0.05)
+
+    session._command(Command(action="jog", immediate_stop=True))
+    now = started + (CONTROL.fps + 1) * period
+    bus.calls.clear()
+    session._manual_tick(now, period, now, (now, now))
+    assert bus.calls == [("Goal_Position", arm._raw_goal(session.pose))]
+    session._manual_tick(now + period, period, now + period, (now, now + period))
+    assert len(bus.calls) == 1

@@ -13,7 +13,7 @@ from ghostpath.models import Command, Configuration, Phase, ReplayProfile
 from ghostpath.motion import JOINTS, Motion
 from ghostpath.poses import write_json
 from ghostpath.robot import SimulatedFollower
-from ghostpath.session import CONTROL, FAST_REPLAY, Session, WorkflowError
+from ghostpath.session import CONTROL, FAST_REPLAY, MANUAL_JOG, Session, WorkflowError
 from ghostpath.torque import TorqueManager
 from ghostpath.trajectory import ReversePath, Sample, Teaching
 
@@ -327,12 +327,14 @@ def test_manual_practice_can_hold_or_park_without_saving_poses_or_data(tmp_path)
             ws.send_json({"action": "practice"})
             practice = wait_for(ws, lambda state: state["phase"] == "practice")
             assert practice["torque"] == "on" and not practice["recording"]
+            assert app.state.session.robot.settings == MANUAL_JOG
             ws.send_json({"action": "jog", "axes": {"shoulder_pan": 1}})
             moved = wait_for(ws, lambda state: state["pose"]["shoulder_pan"] > 0.15)
             ws.send_json({"action": "finish_practice"})
             held = wait_for(ws, lambda state: state["phase"] == "ready")
             assert held["pose"]["shoulder_pan"] >= moved["pose"]["shoulder_pan"]
             assert held["start_pose"] is None
+            assert app.state.session.robot.settings == CONTROL
             ws.send_json({"action": "practice"})
             wait_for(ws, lambda state: state["phase"] == "practice")
             ws.send_json({"action": "park"})
@@ -449,12 +451,13 @@ def test_replay_records_initial_alignment_and_manual_handoff(
                 assert handoff["progress"] < 1
             else:
                 assert handoff["progress"] == pytest.approx(1)
-            assert app.state.session.robot.settings == CONTROL
+            assert app.state.session.robot.settings == MANUAL_JOG
             ws.send_json({"action": "jog", "axes": {"gripper": -1}})
             wait_for(ws, lambda s: s["phase"] == "manual" and s["pose"]["gripper"] < 64.9)
             ws.send_json({"action": "jog", "axes": {}})
             ws.send_json({"action": "finish_manual"})
             review = wait_for(ws, lambda s: s["phase"] == "review")
+            assert app.state.session.robot.settings == CONTROL
             quality = review["quality"]
             timing = quality["replay_timing"]
             if early:
