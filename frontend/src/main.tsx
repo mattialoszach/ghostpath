@@ -172,7 +172,9 @@ function Workflow({ state, config, send, online, available }: {
     'continue_teach', 'Continue this path?', 'Support the arm and gripper before releasing torque. Continue from the current endpoint.', 'Continue teaching',
   )
   const startReplay = () => instruct(
-    'replay', 'Replay and record this take?', 'Verify the scene is reset and clear the arm’s full path and camera views.', 'Replay & record',
+    'replay', 'Replay and record this take?', manualFinish
+      ? 'Verify the scene is reset. Clear and supervise the full path, including space for manual corrections.'
+      : 'Verify the scene is reset and clear the arm’s full path and camera views.', 'Replay & record',
     { manual_finish: manualFinish, firm_carry_grip: firmCarryGrip },
   )
   const autoReset = () => instruct(
@@ -334,7 +336,7 @@ function Workflow({ state, config, send, online, available }: {
             </label>}
             <label className="manual-option">
               <input type="checkbox" checked={manualFinish} disabled={!available} onChange={event => setManualFinish(event.target.checked)} />
-              <span><strong>Manual finish</strong><small>Take over with Space + a direction key during replay, or start manual control when it ends.</small></span>
+              <span><strong>Manual finish</strong><small>Override individual joints during replay, then continue under full manual control when the path ends.</small></span>
             </label>
             {state?.grip?.saved && <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
           </div>
@@ -362,7 +364,7 @@ function Workflow({ state, config, send, online, available }: {
         </div>
         {state?.grip && (state.grip.enabled || phase === 'replay') &&
           <GripPanel grip={state.grip} duration={state.path?.duration ?? 0} send={send} />}
-        {phase === 'replay' && !replayKeyboard && <p className="hint">Taking over ends replay, not the recording.</p>}
+        {phase === 'replay' && <p className="hint">Take over ends replay, not the recording.</p>}
       </>
       if (phase === 'replay') controls = <>
         <button className="button primary" disabled={!available} onClick={() => send('take_over', { confirmed: true })}><Hand size={15} /> Take over</button>

@@ -115,9 +115,9 @@ class Motion:
             if not lo <= pose[j] <= hi:
                 raise SafetyFault(f"{j}: {pose[j]:.2f} outside safe range [{lo:.2f}, {hi:.2f}]")
 
-    def check_tracking(self, measured: Pose):
+    def check_tracking(self, measured: Pose, *, joints: tuple[str, ...] = JOINTS):
         self.check_measurement(measured)
-        for j in JOINTS:
+        for j in joints:
             if abs(self.target[j] - measured[j]) > self.settings.lead(j):
                 raise SafetyFault(f"{j} is not tracking its target; check for an obstruction")
 
@@ -147,13 +147,16 @@ class Motion:
             return 0.0, 0.0  # Below encoder resolution; finish braking without an endless tail.
         return velocity, acceleration
 
-    def step(self, axes: Pose, dt: float, measured: Pose, precision: bool = False) -> Pose:
+    def step(
+        self, axes: Pose, dt: float, measured: Pose, precision: bool = False, *,
+        joints: tuple[str, ...] = JOINTS,
+    ) -> Pose:
         if not math.isfinite(dt) or dt <= 0 or dt > self.settings.watchdog:
             raise SafetyFault("Control loop missed its deadline; release the controls and restart")
         self.check_measurement(measured)
         # Account for ordinary scheduling jitter without replaying a long stall.
         dt = min(dt, 2 / self.settings.fps)
-        for j in JOINTS:
+        for j in joints:
             axis = axes.get(j, 0.0)
             if not math.isfinite(axis) or abs(axis) > 1:
                 raise SafetyFault("Invalid keyboard input")
@@ -194,6 +197,54 @@ class Motion:
     @property
     def stopped(self) -> bool:
         return all(abs(v) < 1e-8 for v in self.velocity.values())
+
+
+class ReplayJog:
+    """Own selected joints temporarily, then ease them toward the live replay goals."""
+
+    def __init__(self, initial: Pose, limits: dict[str, tuple[float, float]], settings: Settings):
+        self.motion = Motion(initial, limits, settings)
+        self.joints: tuple[str, ...] = ()
+        self.automatic = initial
+        self.automatic_velocity = dict.fromkeys(JOINTS, 0.0)
+
+    def check_tracking(self, observed: Pose):
+        if self.joints:
+            self.motion.check_tracking(observed, joints=self.joints)
+
+    def step(
+        self, axes: Pose, dt: float, observed: Pose, automatic: Pose, *, immediate: bool = False,
+    ) -> Pose:
+        previous = self.joints
+        prior_automatic, self.automatic = self.automatic, automatic
+        joints = tuple(joint for joint in JOINTS if joint in axes or joint in previous)
+        if not joints:
+            return automatic
+        motion = self.motion
+        directions = {}
+        for joint in joints:
+            speed = (automatic[joint] - prior_automatic[joint]) / dt
+            filtered = self.automatic_velocity[joint] if joint in previous else 0.0
+            speed = filtered + min(1.0, dt / 0.08) * (speed - filtered)
+            self.automatic_velocity[joint] = speed
+            if immediate or joint not in previous:
+                low, high = motion.limits[joint]
+                motion.target[joint] = max(low, min(high, observed[joint]))
+                motion.velocity[joint] = motion.acceleration[joint] = 0.0
+            if joint in axes:
+                directions[joint] = axes[joint]
+            else:
+                error = automatic[joint] - motion.target[joint]
+                velocity = speed + error / (4 * motion.settings.response_time)
+                directions[joint] = max(-1.0, min(1.0, velocity / motion.settings.velocity(joint)))
+        if not immediate:
+            motion.step(directions, dt, observed, joints=joints)
+        self.joints = tuple(
+            joint for joint in joints if immediate or joint in axes
+            or abs(motion.target[joint] - automatic[joint]) > 0.10
+            or abs(observed[joint] - automatic[joint]) > motion.settings.lead(joint) - 0.25
+        )
+        return {**automatic, **{joint: motion.target[joint] for joint in self.joints}}
 
 
 class ParkTrajectory:

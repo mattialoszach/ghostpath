@@ -359,6 +359,18 @@ class Player:
         self.settled: tuple[float, Pose] | None = None
         self.tracking_joint: str | None = None
         self.stall_check: tuple[str, float, float] | None = None
+        self.overridden: tuple[str, ...] = ()
+
+    @property
+    def tracking_joints(self) -> tuple[str, ...]:
+        if not self.overridden:
+            return JOINTS
+        return tuple(joint for joint in JOINTS if joint not in self.overridden)
+
+    def set_overridden(self, joints: tuple[str, ...]):
+        if self.overridden != joints:
+            self.overridden = joints
+            self.settled = None
 
     def step(self, now: float, observed: Pose) -> tuple[Pose, bool]:
         settings = self.motion.settings
@@ -367,6 +379,8 @@ class Player:
             raise SafetyFault("The motion loop missed its deadline.")
         self.motion.check_measurement(observed)
         errors = self._lag(observed)
+        for joint in self.overridden:
+            errors[joint] = 0.0
         worst = max(JOINTS, key=lambda j: errors[j] / settings.lead(j))
         ratio = errors[worst] / settings.lead(worst)
         if ratio > 1:
@@ -398,8 +412,9 @@ class Player:
         target = self.motion.target
         if now - self.ended > 5:
             worst = max(
-                JOINTS,
+                self.tracking_joints,
                 key=lambda j: abs(observed[j] - target[j]) / tolerance_for(j, self.tolerance),
+                default=worst,
             )
             raise SafetyFault(
                 self._joint_fault(worst, observed, "could not settle at the endpoint")
@@ -410,11 +425,12 @@ class Player:
         return {j: abs(self.motion.target[j] - observed[j]) for j in JOINTS}
 
     def _stationary(self, now: float, observed: Pose, target: Pose) -> bool:
-        if any(abs(observed[j] - target[j]) > tolerance_for(j, self.tolerance) for j in JOINTS):
+        tracking = self.tracking_joints
+        if any(abs(observed[j] - target[j]) > tolerance_for(j, self.tolerance) for j in tracking):
             self.settled = None
         elif self.settled is None or any(
             abs(observed[j] - self.settled[1][j]) > (0.7 if j == "gripper" else 0.45)
-            for j in JOINTS
+            for j in tracking
         ):
             self.settled = (now, observed.copy())
         return self.settled is not None and now - self.settled[0] >= self.settle_seconds
@@ -454,8 +470,10 @@ class LoadTrim:
         self.bias = {j: held[j] - initial[j] for j in LOAD_AXES}
         self.filtered = dict.fromkeys(LOAD_AXES, 0.0)
 
-    def update(self, dt: float, reference: Pose, observed: Pose):
+    def update(self, dt: float, reference: Pose, observed: Pose, *, excluded: tuple[str, ...] = ()):
         for j in LOAD_AXES:
+            if j in excluded:
+                continue
             error = reference[j] - observed[j]
             previous = self.filtered[j]
             self.filtered[j] += min(1.0, dt / 0.20) * (error - previous)
@@ -526,7 +544,7 @@ class ServoPlayer(Player):
     def check_issued(self, observed: Pose):
         settings = self.motion.settings
         self.motion.check_measurement(observed)
-        for joint in JOINTS:
+        for joint in self.tracking_joints:
             if abs(self.issued[joint] - observed[joint]) > self.trim.limit(joint, settings):
                 unit = "%" if joint == "gripper" else "°"
                 name = joint.replace("_", " ").capitalize()
@@ -540,7 +558,7 @@ class ServoPlayer(Player):
         self.check_issued(observed)
         dt = min(max(0.0, now - self.last), 1.3 / settings.fps)
         target, done = super().step(now, observed)
-        self.trim.update(dt, target, observed)
+        self.trim.update(dt, target, observed, excluded=self.overridden)
         if now >= self.next_write or done:
             advance = min(0.065, (now - self.last_write) * 1.30)
             self.next_write = now + 0.030
@@ -555,7 +573,7 @@ class ServoPlayer(Player):
                 candidate = self.trim.goal(self.path.at(cursor), self.motion)
                 if all(
                     abs(candidate[j] - observed[j]) <= self.trim.limit(j, settings) - 0.25
-                    for j in JOINTS
+                    for j in self.tracking_joints
                 ):
                     self.goal_cursor, self.issued = cursor, self.motion.clamp(candidate)
                     break

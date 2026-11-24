@@ -420,6 +420,88 @@ def test_manual_jog_eases_release_but_holds_on_blur_or_stale_input(
         session._close_devices()
 
 
+@pytest.mark.parametrize("release", ["key-up", "expired-lease"])
+def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(tmp_path, release):
+    dataset_module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    start = SimulatedFollower(CONTROL).read()
+    path_id = "20261120T000000-abcdef12"
+    path_file = tmp_path / "paths" / f"{path_id}.json"
+    write_json(path_file, {
+        "version": 1, "robot_id": "simulation", "calibration": "simulation",
+        "start_pose": start, "complete": True, "task": "move", "created": "2026-11-20T00:00:00Z",
+        "samples": [
+            {"t": tick / 60, "pose": {**start, "shoulder_pan": tick / 18}}
+            for tick in range(241)
+        ],
+    })
+    original = path_file.read_bytes()
+    app = create_app(tmp_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        with client.websocket_connect("ws://localhost/ws") as ws:
+            def hold_jog_until(predicate):
+                def refresh(state):
+                    if predicate(state):
+                        return True
+                    ws.send_json({"action": "jog", "axes": {"gripper": -1}})
+                    return False
+
+                ws.send_json({"action": "jog", "axes": {"gripper": -1}})
+                return wait_for(ws, refresh)
+
+            ws.send_json({"action": "connect", "config": {"cameras": []}})
+            wait_for(ws, lambda state: state["phase"] == "ready")
+            ws.send_json({"action": "load_path", "path_id": path_id})
+            wait_for(ws, lambda state: state["phase"] == "reset" and state["at_start"])
+            ws.send_json({"action": "replay", "manual_finish": True})
+            first = wait_for(
+                ws, lambda state: state["can_override_replay"] and state["progress"] > .10
+            )
+            ws.send_json({"action": "set_jog_speed", "jog_speed": "normal"})
+            wait_for(ws, lambda state: state["jog_speed"] == "normal")
+            assert app.state.session.robot.settings == CONTROL
+            overridden = hold_jog_until(lambda state: state["pose"]["gripper"] < 63.5)
+            assert overridden["phase"] == "replay" and overridden["recording"]
+            assert overridden["override_joints"] == ["gripper"]
+            assert not overridden["can_set_jog_speed"]
+            assert overridden["pose"]["shoulder_pan"] > first["pose"]["shoulder_pan"] + 0.5
+            if release == "key-up":
+                ws.send_json({"action": "jog", "axes": {}})
+            rejoined = wait_for(ws, lambda state: state["can_set_jog_speed"])
+            assert rejoined["phase"] == "replay" and rejoined["override_joints"] == []
+            assert rejoined["pose"]["gripper"] == pytest.approx(65, abs=0.4)
+
+            wait_for(ws, lambda state: state["phase"] == "replay" and state["progress"] >= .88)
+            manual = hold_jog_until(lambda state: state["phase"] == "manual")
+            assert manual["recording"] and manual["progress"] == 1
+            assert manual["pose"]["gripper"] < 63.5
+            wait_for(ws, lambda state: state["pose"]["gripper"] < manual["pose"]["gripper"] - 0.5)
+            ws.send_json({"action": "jog", "axes": {}})
+            ws.send_json({"action": "finish_manual"})
+            wait_for(ws, lambda state: state["phase"] == "review")
+            ws.send_json({"action": "save"})
+            wait_for(ws, lambda state: state["phase"] == "next")
+
+    assert path_file.read_bytes() == original
+    root = tmp_path / "datasets" / "block-placement"
+    dataset = dataset_module.LeRobotDataset(
+        "local/block-placement", root=root, video_backend="pyav"
+    )
+    flags = [frame["ghostpath.manual"].item() for frame in dataset]
+    assert not flags[0] and flags[-1] and False in flags[flags.index(True):]
+    (episode,) = json.loads((root / "ghostpath.json").read_text())["episodes"]
+    assert "manual_takeover_seconds" not in episode
+    ticks = json.loads((root / episode["control_trace"]).read_text())["ticks"]
+    overlays = [tick for tick in ticks if tick.get("override_joints") == ["gripper"]]
+    assert len(overlays) > 10
+    assert all(tick["stage"] in {"path", "settling"} for tick in overlays)
+    assert all(tick["path_cursor"] is not None for tick in overlays)
+    assert any(tick["state"][-1] != tick["action"][-1] for tick in overlays)
+    assert any(
+        tick["stage"] == "manual" and tick["action"][-1] < manual["pose"]["gripper"]
+        for tick in ticks
+    )
+
+
 @pytest.mark.parametrize("handoff_kind", ["automatic", "fault_in_review", "takeover"])
 def test_replay_records_initial_alignment_and_manual_handoff(
     tmp_path, monkeypatch, handoff_kind
@@ -466,6 +548,7 @@ def test_replay_records_initial_alignment_and_manual_handoff(
             ws.send_json({"action": "replay", "manual_finish": not early})
             aligning = wait_for(ws, lambda s: s["replay_stage"] == "aligning" and s["frames"] > 0)
             assert aligning["recording"]
+            assert not aligning["can_override_replay"]
             assert aligning["progress"] == 0
             assert app.state.session.robot.settings == FAST_REPLAY
             if early:

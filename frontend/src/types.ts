@@ -109,6 +109,8 @@ export interface State {
   at_rest: boolean
   can_continue: boolean
   manual_finish: boolean
+  can_override_replay: boolean
+  override_joints: Joint[]
   jog_speed: JogSpeed
   can_set_jog_speed: boolean
   firm_carry_grip: boolean

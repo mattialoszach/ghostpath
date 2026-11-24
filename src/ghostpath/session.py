@@ -18,7 +18,7 @@ from .cameras import CameraNotReady, Cameras, source_index
 from .dataset import Datasets, Record
 from .grip import CarryGripPath, GripAssist, GrippedPath
 from .models import Command, Configuration, JogSpeed, Mode, Phase, ReplayProfile
-from .motion import JOINTS, Motion, ParkTrajectory, Pose, SafetyFault, Settings
+from .motion import JOINTS, Motion, ParkTrajectory, Pose, ReplayJog, SafetyFault, Settings
 from .poses import SavedStart, write_json
 from .robot import Follower, Robot, SimulatedFollower
 from .torque import TorqueManager
@@ -119,6 +119,7 @@ class Session:
         self.jog_at = 0.0
         self.jog_active = False
         self.jog_hard_stop = False
+        self.replay_jog: ReplayJog | None = None
         self.record_origin: float | None = None
         self.record_index = 0
         self.record_candidate: Record | None = None
@@ -231,7 +232,7 @@ class Session:
 
     def _command(self, cmd: Command):
         action = cmd.action
-        if action == "jog" and not cmd.axes and self.phase not in JOG_PHASES:
+        if action == "jog" and not cmd.axes and not self._can_jog():
             return
         if self.fault and self.phase != Phase.FAULT and action not in {
             "save",
@@ -429,12 +430,14 @@ class Session:
             self._confirmed(cmd, "Confirm manual takeover.")
             self.takeover_requested = True
         elif action == "set_jog_speed":
-            self._require(*JOG_PHASES)
+            if not self._can_jog():
+                raise WorkflowError("Jog speed is only available while manual controls are active.")
             if cmd.jog_speed is None:
                 raise WorkflowError("Choose a manual jog speed.")
             self._set_jog_speed(cmd.jog_speed)
         elif action == "jog":
-            self._require(*JOG_PHASES)
+            if not self._can_jog():
+                raise WorkflowError("Manual jog is not available in this step.")
             if any(j not in JOINTS or abs(v) > 1 for j, v in cmd.axes.items()):
                 raise WorkflowError("Invalid manual joint input.")
             if cmd.immediate_stop and any(cmd.axes.values()):
@@ -686,6 +689,7 @@ class Session:
         self.grip_assist_enabled = False
         self.grip_assist = None
         self.jog_speed = JogSpeed.PRECISION
+        self.replay_jog = None
         self.stopped_early = False
         self.scene_reversed = False
         self.power = None
@@ -1174,6 +1178,11 @@ class Session:
             self.replay_firm_carries = len(carry_grip.grasps) if carry_grip else None
             path = AlignedPath(origin, carry_grip or self.path, CONTROL)
             self._start_player(path, Phase.REPLAY, held=latched, settings=self.path.settings)
+            self._clear_jog()
+            self.replay_jog = (
+                ReplayJog(latched, self.robot.limits, JOG_SETTINGS[self.jog_speed])
+                if self.manual_finish else None
+            )
             self.replay_path_started = None if path.prefix else self.player.started
             self.replay_timing = None
             self._clear_teaching()
@@ -1253,10 +1262,13 @@ class Session:
             ):
                 self._stop_teaching()
         elif self.phase == Phase.REPLAY and self.takeover_requested:
+            if self.replay_jog is not None:
+                self.replay_jog.check_tracking(self.pose)
+                self.player.set_overridden(self.replay_jog.joints)
             if isinstance(self.player, ServoPlayer):
                 self.player.check_issued(self.pose)
             else:
-                self.player.motion.check_tracking(self.pose)
+                self.player.motion.check_tracking(self.pose, joints=self.player.tracking_joints)
             self._assert_controller()
             send_started = time.monotonic()
             sent = self.robot.send(self.motion.clamp(self.pose), force=True)
@@ -1272,7 +1284,25 @@ class Session:
             assist = self.grip_assist
             if assist:
                 assist.advance(stamp, dt, self.player.cursor)
+            overlay = self.replay_jog if self.phase == Phase.REPLAY else None
+            if overlay is not None:
+                overlay.check_tracking(self.pose)
+                self.player.set_overridden(overlay.joints)
             target, done = self.player.step(stamp, self.pose)
+            reference = self.player.motion.target
+            override_joints = ()
+            if overlay is not None and self._can_override_replay():
+                immediate = self.jog_hard_stop or (
+                    bool(self.axes) and now - self.jog_at >= JOG_LEASE_SECONDS
+                )
+                if immediate:
+                    self._clear_jog()
+                target = overlay.step(
+                    self.axes, max(0.0001, dt), self.pose, target, immediate=immediate,
+                )
+                override_joints = overlay.joints
+                if override_joints:
+                    reference = {**reference, **{joint: target[joint] for joint in override_joints}}
             self._assert_controller()
             send_started = time.monotonic()
             sent = self.robot.send(target)
@@ -1298,9 +1328,10 @@ class Session:
                 if self.player.ended is not None:
                     stage = "settling"
                 self._record(
-                    stamp, sent, reference=self.player.motion.target,
+                    stamp, sent, manual=bool(override_joints), reference=reference,
                     encoder_read=encoder_read, command_send=command_send, stage=stage,
                     path_cursor=self.player.cursor, replay_rate=self.player.rate,
+                    override_joints=override_joints,
                 )
                 if done:
                     path_start, settle_start = self.replay_path_started, self.player.ended
@@ -1311,7 +1342,7 @@ class Session:
                             "settle_seconds": round(stamp - settle_start, 3),
                         }
                     if self.manual_finish:
-                        self._start_manual(stamp, sent)
+                        self._start_manual(stamp, sent, resume_jog=True)
                     else:
                         self._seal()
             elif done and self.reset_action == "reverse_approach":
@@ -1340,7 +1371,18 @@ class Session:
         self.jog_at = 0.0
         self.jog_active = self.jog_hard_stop = False
 
+    def _can_override_replay(self) -> bool:
+        return (
+            self.phase == Phase.REPLAY and self.replay_jog is not None
+            and self.player.cursor >= self.player.path.prefix
+        )
+
+    def _can_jog(self) -> bool:
+        return self.phase in JOG_PHASES or self._can_override_replay()
+
     def _jog_settled(self) -> bool:
+        if self._can_override_replay():
+            return not self.axes and not self.replay_jog.joints
         return (
             not self.axes and not self.jog_active and self.motion.stopped
             and self._near(self.manual_goal)
@@ -1352,6 +1394,11 @@ class Session:
         if not self._jog_settled():
             raise WorkflowError("Release the jog controls and let the arm settle first.")
         self._assert_controller()
+        settings = JOG_SETTINGS[speed]
+        if self._can_override_replay():
+            self.replay_jog.motion.settings = settings
+            self.jog_speed = speed
+            return
         self._verify_holding()
         self.robot.verify_goals()
         self.pose = self.robot.read()
@@ -1359,12 +1406,14 @@ class Session:
         if not self._near(self.manual_goal):
             raise WorkflowError("Wait for the arm to reach its hold position first.")
         self._assert_controller()
-        settings = JOG_SETTINGS[speed]
         self.robot.stream_profile(settings)
         self.motion.settings = settings
         self.jog_speed = speed
 
-    def _start_manual(self, stamp: float, sent: Pose, *, practice: bool = False):
+    def _start_manual(
+        self, stamp: float, sent: Pose, *, practice: bool = False, resume_jog: bool = False,
+    ):
+        overlay, self.replay_jog = self.replay_jog, None
         settings = JOG_SETTINGS[self.jog_speed]
         self.robot.stream_profile(settings)
         self._assert_controller()
@@ -1376,7 +1425,13 @@ class Session:
         self.takeover_requested = False
         self.manual_started = stamp
         self.manual_goal = sent
-        self._clear_jog()
+        if resume_jog and overlay is not None and self.axes:
+            for joint in self.axes:
+                self.motion.velocity[joint] = overlay.motion.velocity[joint]
+                self.motion.acceleration[joint] = overlay.motion.acceleration[joint]
+            self.jog_active = True
+        else:
+            self._clear_jog()
         if practice:
             self.notice = ""
         elif self.manual_takeover_seconds is not None:
@@ -1430,6 +1485,7 @@ class Session:
         encoder_read: tuple[float, float] | None = None,
         command_send: tuple[float, float] | None = None, stage: str = "",
         path_cursor: float | None = None, replay_rate: float | None = None,
+        override_joints: tuple[str, ...] = (),
     ):
         if self.datasets.error:
             raise SafetyFault(self.datasets.error)
@@ -1440,7 +1496,7 @@ class Session:
         current = Record(
             stamp, self.pose.copy(), sent.copy(), manual,
             reference.copy() if reference is not None else None,
-            encoder_read, command_send, stage, path_cursor, replay_rate,
+            encoder_read, command_send, stage, path_cursor, replay_rate, override_joints,
         )
         self.control_trace.append(current)
         self.record_candidate = current
@@ -1452,6 +1508,7 @@ class Session:
             prior is not None
             and prior.timestamp > self.last_recorded_at
             and prior.manual == manual
+            and prior.override_joints == override_joints
             and due - prior.timestamp < stamp - due
         ):
             current = prior
@@ -1460,6 +1517,7 @@ class Session:
         self.record_index += 1
 
     def _seal(self, *, stopped: bool = False):
+        self.replay_jog = None
         self.stopped_early = stopped
         trace, self.control_trace = self.control_trace, []
         self._begin_operation(
@@ -1486,6 +1544,7 @@ class Session:
         self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist = None
+        self.replay_jog = None
         self.takeover_requested = False
         self._clear_jog()
         if self.robot:
@@ -1544,7 +1603,9 @@ class Session:
             "can_continue": self._can_continue(),
             "manual_finish": self.manual_finish,
             "jog_speed": self.jog_speed,
-            "can_set_jog_speed": self.phase in JOG_PHASES and self._jog_settled(),
+            "can_override_replay": self._can_override_replay(),
+            "override_joints": self.replay_jog.joints if self.replay_jog is not None else (),
+            "can_set_jog_speed": self._can_jog() and self._jog_settled(),
             "firm_carry_grip": self.firm_carry_grip,
             "replay_firm_carries": self.replay_firm_carries if self.phase == Phase.REPLAY else None,
             "replay_stage": (

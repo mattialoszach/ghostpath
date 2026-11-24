@@ -400,10 +400,9 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
   const input = useRef<JogInput | null>(null)
   const pressed = useRef(new Set<string>())
   const spaceHeld = useRef(false)
-  const takeoverRequested = useRef(false)
   const active = useRef<Partial<Record<Joint, number>>>({})
   const [highlight, setHighlight] = useState(active.current)
-  const canJog = enabled && !pending && !replaying
+  const canJog = enabled && !pending && (!replaying || state.can_override_replay)
 
   const transmit = useCallback(() => {
     const current = input.current
@@ -438,8 +437,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       clear()
       return
     }
-    if (replaying || canJog) panel.current?.focus({ preventScroll: true })
-    if (canJog && pressed.current.size) transmit()
+    if (canJog) panel.current?.focus({ preventScroll: true })
     const tick = canJog ? window.setInterval(() => {
       if (Object.keys(active.current).length) send('jog', { axes: active.current })
     }, 80) : undefined
@@ -453,7 +451,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       document.removeEventListener('visibilitychange', visibility)
       if (canJog) stop()
     }
-  }, [canJog, clear, enabled, replaying, send, stop, transmit])
+  }, [canJog, clear, enabled, send, stop])
 
   const start = (next: JogInput) => {
     if (!canJog || input.current) return
@@ -486,19 +484,14 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
       if (event.code === 'Space') {
         event.preventDefault()
-        if (replaying && !pending && !event.repeat) spaceHeld.current = true
+        if (replaying && canJog && !event.repeat) spaceHeld.current = true
         return
       }
-      if (!directionCodes.has(event.code)) return
-      if (replaying ? !spaceHeld.current || (pending && !takeoverRequested.current) : !canJog) return
+      if (!canJog || (replaying && !spaceHeld.current) || !directionCodes.has(event.code)) return
       event.preventDefault()
       if (!input.current && !event.repeat && !pressed.current.has(event.code)) {
         pressed.current.add(event.code)
-        if (!replaying) transmit()
-        else if (!takeoverRequested.current) {
-          takeoverRequested.current = true
-          send('take_over', { confirmed: true })
-        }
+        transmit()
       }
     }}
     onKeyUp={event => {
@@ -509,16 +502,18 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
         if (moving && canJog) transmit()
       } else if (pressed.current.delete(event.code) && canJog) transmit()
     }}>
-    <p>{replaying ? <>Hold <kbd>Space</kbd> and press a direction key to take over. Replay ends, but recording continues.</>
-      : 'Hold a direction key or button to move. Release to ease to a stop.'}</p>
-    {!replaying && <label className="field">Jog speed
+    <p>{!replaying ? 'Hold a direction key or button to move. Release to ease to a stop.'
+      : state.can_override_replay ? <>Hold <kbd>Space</kbd> and a direction key to override that joint while the rest follow the path. Release to ease back.</>
+        : 'Joint overrides are available once alignment finishes.'}</p>
+    {state.override_joints.length > 0 && <p>Override: {state.override_joints.map(joint => jointLabels[joint]).join(', ')}</p>}
+    <label className="field">Jog speed
       <select value={state.jog_speed} disabled={!canJog || !state.can_set_jog_speed || Object.keys(highlight).length > 0}
         onChange={event => send('set_jog_speed', { jog_speed: event.target.value as JogSpeed })}>
         <option value="precision">Precision · 1×</option>
         <option value="normal">Normal · 2×</option>
         <option value="fast">Fast · 3×</option>
       </select>
-    </label>}
+    </label>
     <dl>{joints.map(joint => <div key={joint}>
       <dt>{jointLabels[joint]}</dt>
       {jogKeys[joint].map(({ code, label, value }) => <dd key={code}>

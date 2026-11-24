@@ -4,9 +4,9 @@ from copy import deepcopy
 import pytest
 
 from ghostpath.grip import GRIP_LIMIT, REVERSE_PRELOAD, CarryGripPath, GripAssist
-from ghostpath.motion import JOINTS, Motion, ParkTrajectory, SafetyFault
+from ghostpath.motion import JOINTS, Motion, ParkTrajectory, ReplayJog, SafetyFault
 from ghostpath.robot import SimulatedFollower
-from ghostpath.session import CONTROL
+from ghostpath.session import CONTROL, MANUAL_JOG
 from ghostpath.trajectory import (
     JOINT_MARGIN,
     REPLAY_RATE_DECEL,
@@ -275,6 +275,63 @@ def test_player_slows_for_lag_and_keeps_commands_monotonic():
     assert done
     assert min(rates) < 0.7
     assert observed["elbow_flex"] == pytest.approx(32, abs=2)
+
+
+@pytest.mark.parametrize("servo", [False, True], ids=["simulation", "servo-lookahead"])
+def test_replay_jog_leaves_other_joints_on_path_and_rejoins_without_a_jump(servo):
+    robot = SimulatedFollower(CONTROL)
+    start = robot.read()
+    path = ParkTrajectory(start, {**start, "shoulder_pan": 68.0, "elbow_flex": 18.0}, CONTROL)
+    motion = Motion(start, robot.limits, CONTROL)
+    player = (
+        ServoPlayer(path, motion, 0, 2.0, held=start) if servo else Player(path, motion, 0, 2.0)
+    )
+    jog = ReplayJog(start, robot.limits, MANUAL_JOG)
+    observed = start
+    joint = "elbow_flex"
+    dt = 1 / CONTROL.fps
+    joined = False
+    for step in range(1, 4 * CONTROL.fps):
+        now = step * dt
+        axes = {joint: -1.0} if 12 <= step < 46 else {}
+        before = jog.joints
+        jog.check_tracking(observed)
+        player.set_overridden(before)
+        automatic, done = player.step(now, observed)
+        target = jog.step(axes, dt, observed, automatic)
+        assert not done
+        assert player.cursor == pytest.approx(now)
+        assert all(target[other] == automatic[other] for other in JOINTS if other != joint)
+        if axes:
+            assert jog.joints == (joint,)
+            assert target[joint] <= observed[joint]
+        if before:
+            assert abs(target[joint] - observed[joint]) <= MANUAL_JOG.velocity(joint) * dt + 0.101
+        if step == 40:
+            assert target[joint] < automatic[joint] - 3
+            blocked = {**target, joint: target[joint] + 7}
+            with pytest.raises(SafetyFault, match=f"{joint} is not tracking"):
+                jog.check_tracking(blocked)
+        if step >= 46 and before and not jog.joints:
+            joined = True
+            assert target == automatic
+        observed = target
+    assert joined
+
+
+def test_replay_jog_cancellation_holds_only_owned_joints_at_feedback():
+    robot = SimulatedFollower(CONTROL)
+    observed = robot.read()
+    automatic = {**observed, "shoulder_pan": 5.0, "gripper": 70.0}
+    jog = ReplayJog(observed, robot.limits, MANUAL_JOG)
+    dt = 1 / CONTROL.fps
+    for _ in range(15):
+        jog.step({"gripper": -1.0}, dt, observed, automatic)
+    assert jog.motion.target["gripper"] < observed["gripper"]
+    target = jog.step({}, dt, observed, automatic, immediate=True)
+    assert jog.motion.stopped
+    assert jog.joints == ("gripper",)
+    assert target == {**automatic, "gripper": observed["gripper"]}
 
 
 def test_player_aborts_a_stalled_joint_with_measured_goal_context():

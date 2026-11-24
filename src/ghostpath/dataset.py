@@ -45,6 +45,7 @@ class Record:
     stage: str = ""
     path_cursor: float | None = None
     replay_rate: float | None = None
+    override_joints: tuple[str, ...] = ()
 
     @property
     def cutoff(self) -> float:
@@ -643,6 +644,10 @@ class Datasets:
                         "stage": tick.stage,
                         "path_cursor": tick.path_cursor,
                         "replay_rate": tick.replay_rate,
+                        **(
+                            {"override_joints": tick.override_joints}
+                            if tick.override_joints else {}
+                        ),
                         "state": [tick.state[joint] for joint in JOINTS],
                         "action": [tick.action[joint] for joint in JOINTS],
                         "reference": (
