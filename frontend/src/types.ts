@@ -5,6 +5,7 @@ export type Phase = 'setup' | 'ready' | 'practice' | 'teaching' | 'teach_paused'
   'replay' | 'manual' | 'processing' | 'review' | 'saving' | 'next' | 'finished' | 'fault'
 export type Mode = 'teach' | 'repeat' | 'hybrid'
 export type ReplayProfile = 'standard' | 'fast'
+export type JogSpeed = 'precision' | 'normal' | 'fast'
 
 export const replayProfileLabels: Record<ReplayProfile, string> = {
   standard: 'Standard limits',
@@ -108,6 +109,8 @@ export interface State {
   at_rest: boolean
   can_continue: boolean
   manual_finish: boolean
+  jog_speed: JogSpeed
+  can_set_jog_speed: boolean
   firm_carry_grip: boolean
   replay_firm_carries: number | null
   replay_stage: 'aligning' | 'path' | 'settling' | null

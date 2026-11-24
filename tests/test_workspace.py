@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from ghostpath.api import create_app
 from ghostpath.cameras import CameraNotReady, Cameras
 from ghostpath.grip import CarryGripPath, GrippedPath
-from ghostpath.models import Command, Configuration, Phase, ReplayProfile
+from ghostpath.models import Command, Configuration, JogSpeed, Phase, ReplayProfile
 from ghostpath.motion import JOINTS, Motion
 from ghostpath.poses import write_json
 from ghostpath.robot import SimulatedFollower
@@ -328,7 +328,11 @@ def test_manual_practice_can_hold_or_park_without_saving_poses_or_data(tmp_path)
             ws.send_json({"action": "practice"})
             practice = wait_for(ws, lambda state: state["phase"] == "practice")
             assert practice["torque"] == "on" and not practice["recording"]
+            assert practice["jog_speed"] == "precision" and practice["can_set_jog_speed"]
             assert app.state.session.robot.settings == MANUAL_JOG
+            ws.send_json({"action": "set_jog_speed", "jog_speed": "fast"})
+            wait_for(ws, lambda state: state["jog_speed"] == "fast")
+            assert app.state.session.robot.settings.velocity("shoulder_pan") == 37.5
             ws.send_json({"action": "jog", "axes": {"shoulder_pan": 1}})
             moved = wait_for(ws, lambda state: state["pose"]["shoulder_pan"] > 0.15)
             ws.send_json({"action": "finish_practice"})
@@ -337,7 +341,9 @@ def test_manual_practice_can_hold_or_park_without_saving_poses_or_data(tmp_path)
             assert held["start_pose"] is None
             assert app.state.session.robot.settings == CONTROL
             ws.send_json({"action": "practice"})
-            wait_for(ws, lambda state: state["phase"] == "practice")
+            practice = wait_for(ws, lambda state: state["phase"] == "practice")
+            assert practice["jog_speed"] == "fast"
+            assert app.state.session.robot.settings.velocity("shoulder_pan") == 37.5
             ws.send_json({"action": "park"})
             wait_for(ws, lambda state: state["phase"] == "returning")
             parked = wait_for(ws, lambda state: state["phase"] == "ready" and state["at_rest"])
@@ -354,14 +360,25 @@ def test_manual_practice_can_hold_or_park_without_saving_poses_or_data(tmp_path)
 
 
 @pytest.mark.parametrize("release", ["normal", "blur", "stale"])
-def test_manual_jog_eases_normal_release_but_holds_on_blur_or_stale_input(tmp_path, release):
+@pytest.mark.parametrize(("speed", "rate", "brake_limit"), [
+    (JogSpeed.PRECISION, 12.5, 1.6), (JogSpeed.NORMAL, 25, 3.3), (JogSpeed.FAST, 37.5, 6.1),
+])
+def test_manual_jog_eases_release_but_holds_on_blur_or_stale_input(
+    tmp_path, monkeypatch, release, speed, rate, brake_limit
+):
     session = Session(tmp_path)
     session.config = Configuration(cameras=[])
     session._command(Command(action="connect"))
     try:
         session._command(Command(action="practice"))
+        monkeypatch.setattr(session.robot, "read", lambda: session.pose.copy())
+        session._command(Command(action="set_jog_speed", jog_speed=speed))
         joint = "shoulder_pan"
         session._command(Command(action="jog", axes={joint: 1}))
+        other_speed = JogSpeed.FAST if speed == JogSpeed.PRECISION else JogSpeed.PRECISION
+        change_speed = Command(action="set_jog_speed", jog_speed=other_speed)
+        with pytest.raises(WorkflowError, match="let the arm settle"):
+            session._command(change_speed)
         period = 1 / CONTROL.fps
 
         def tick(now):
@@ -369,10 +386,14 @@ def test_manual_jog_eases_normal_release_but_holds_on_blur_or_stale_input(tmp_pa
             session._manual_tick(now, period, now, (now, now))
             session.pose = session.manual_goal.copy()
 
-        for step in range(1, 10):
-            tick(session.jog_at + step * period)
+        started = session.jog_at
+        for step in range(1, CONTROL.fps + 1):
+            now = started + step * period
+            if step % 5 == 0:
+                session.jog_at = now
+            tick(now)
         before = session.manual_goal[joint]
-        speed = session.motion.velocity[joint]
+        assert session.motion.velocity[joint] == pytest.approx(rate, abs=0.01)
         if release == "stale":
             tick(session.jog_at + 0.26)
         else:
@@ -381,16 +402,20 @@ def test_manual_jog_eases_normal_release_but_holds_on_blur_or_stale_input(tmp_pa
             tick(started + period)
             if release == "normal":
                 assert session.manual_goal[joint] > before
+                with pytest.raises(WorkflowError, match="let the arm settle"):
+                    session._command(change_speed)
                 for step in range(2, 5):
                     tick(started + step * period)
-                assert 0 < session.motion.velocity[joint] < speed
+                assert 0 < session.motion.velocity[joint] < rate
                 for step in range(5, 26):
                     tick(started + step * period)
-                assert session.manual_goal[joint] - before < 1.5
+                assert session.manual_goal[joint] - before < brake_limit
             else:
                 assert session.manual_goal[joint] == before
         assert session.motion.stopped
         assert not session.jog_active and not session.axes
+        session._command(change_speed)
+        assert session.jog_speed == other_speed
     finally:
         session._close_devices()
 
@@ -453,6 +478,10 @@ def test_replay_records_initial_alignment_and_manual_handoff(
             else:
                 assert handoff["progress"] == pytest.approx(1)
             assert app.state.session.robot.settings == MANUAL_JOG
+            wait_for(ws, lambda s: s["can_set_jog_speed"])
+            ws.send_json({"action": "set_jog_speed", "jog_speed": "normal"})
+            assert wait_for(ws, lambda s: s["jog_speed"] == "normal")["recording"]
+            assert app.state.session.robot.settings.velocity("gripper") == 24
             ws.send_json({"action": "jog", "axes": {"gripper": -1}})
             wait_for(ws, lambda s: s["phase"] == "manual" and s["pose"]["gripper"] < 64.9)
             ws.send_json({"action": "jog", "axes": {}})

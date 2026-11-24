@@ -17,7 +17,7 @@ from uuid import uuid4
 from .cameras import CameraNotReady, Cameras, source_index
 from .dataset import Datasets, Record
 from .grip import CarryGripPath, GripAssist, GrippedPath
-from .models import Command, Configuration, Mode, Phase, ReplayProfile
+from .models import Command, Configuration, JogSpeed, Mode, Phase, ReplayProfile
 from .motion import JOINTS, Motion, ParkTrajectory, Pose, SafetyFault, Settings
 from .poses import SavedStart, write_json
 from .robot import Follower, Robot, SimulatedFollower
@@ -56,6 +56,11 @@ CONTROL = Settings(
     gripper_max_lead=9,
 )
 MANUAL_JOG = replace(CONTROL, speed=12.5, gripper_speed=12, park_speed=12.5)
+JOG_SETTINGS = {
+    JogSpeed.PRECISION: MANUAL_JOG,
+    JogSpeed.NORMAL: replace(MANUAL_JOG, speed=25, gripper_speed=24),
+    JogSpeed.FAST: replace(MANUAL_JOG, speed=37.5, gripper_speed=36),
+}
 FAST_REPLAY = replace(
     CONTROL, speed=120, acceleration=360, gripper_speed=100, gripper_acceleration=400
 )
@@ -110,6 +115,7 @@ class Session:
         self.fault = ""
         self.demo: float | None = None
         self.axes: Pose = {}
+        self.jog_speed = JogSpeed.PRECISION
         self.jog_at = 0.0
         self.jog_active = False
         self.jog_hard_stop = False
@@ -422,6 +428,11 @@ class Session:
             self._require(Phase.REPLAY)
             self._confirmed(cmd, "Confirm manual takeover.")
             self.takeover_requested = True
+        elif action == "set_jog_speed":
+            self._require(*JOG_PHASES)
+            if cmd.jog_speed is None:
+                raise WorkflowError("Choose a manual jog speed.")
+            self._set_jog_speed(cmd.jog_speed)
         elif action == "jog":
             self._require(*JOG_PHASES)
             if any(j not in JOINTS or abs(v) > 1 for j, v in cmd.axes.items()):
@@ -674,6 +685,7 @@ class Session:
         self.firm_carry_grip = False
         self.grip_assist_enabled = False
         self.grip_assist = None
+        self.jog_speed = JogSpeed.PRECISION
         self.stopped_early = False
         self.scene_reversed = False
         self.power = None
@@ -1328,10 +1340,35 @@ class Session:
         self.jog_at = 0.0
         self.jog_active = self.jog_hard_stop = False
 
-    def _start_manual(self, stamp: float, sent: Pose, *, practice: bool = False):
-        self.robot.stream_profile(MANUAL_JOG)
+    def _jog_settled(self) -> bool:
+        return (
+            not self.axes and not self.jog_active and self.motion.stopped
+            and self._near(self.manual_goal)
+        )
+
+    def _set_jog_speed(self, speed: JogSpeed):
+        if speed == self.jog_speed:
+            return
+        if not self._jog_settled():
+            raise WorkflowError("Release the jog controls and let the arm settle first.")
         self._assert_controller()
-        self.motion = Motion(sent, self.robot.limits, MANUAL_JOG)
+        self._verify_holding()
+        self.robot.verify_goals()
+        self.pose = self.robot.read()
+        self.motion.check_tracking(self.pose)
+        if not self._near(self.manual_goal):
+            raise WorkflowError("Wait for the arm to reach its hold position first.")
+        self._assert_controller()
+        settings = JOG_SETTINGS[speed]
+        self.robot.stream_profile(settings)
+        self.motion.settings = settings
+        self.jog_speed = speed
+
+    def _start_manual(self, stamp: float, sent: Pose, *, practice: bool = False):
+        settings = JOG_SETTINGS[self.jog_speed]
+        self.robot.stream_profile(settings)
+        self._assert_controller()
+        self.motion = Motion(sent, self.robot.limits, settings)
         self.last_tick = time.monotonic()
         self.phase = Phase.PRACTICE if practice else Phase.MANUAL
         self.player = None
@@ -1506,6 +1543,8 @@ class Session:
             "custom_rest": self.rest_pose is not None,
             "can_continue": self._can_continue(),
             "manual_finish": self.manual_finish,
+            "jog_speed": self.jog_speed,
+            "can_set_jog_speed": self.phase in JOG_PHASES and self._jog_settled(),
             "firm_carry_grip": self.firm_carry_grip,
             "replay_firm_carries": self.replay_firm_carries if self.phase == Phase.REPLAY else None,
             "replay_stage": (

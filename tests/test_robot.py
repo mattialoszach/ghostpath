@@ -3,10 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from ghostpath.models import Command
+from ghostpath.models import Command, JogSpeed
 from ghostpath.motion import JOINTS, SafetyFault
 from ghostpath.robot import Follower
-from ghostpath.session import CONTROL, FAST_REPLAY, Session
+from ghostpath.session import CONTROL, FAST_REPLAY, Session, WorkflowError
 
 
 class Bus:
@@ -147,6 +147,37 @@ def test_fast_profile_is_verified_and_restores_standard_registers(rig, monkeypat
     monkeypatch.setattr(bus, "sync_write", write)
     arm.stream_profile(FAST_REPLAY)
     assert all(bus.reg["Goal_Speed"][j] > standard["Goal_Speed"][j] for j in JOINTS)
+
+
+def test_manual_jog_speed_switch_checks_feedback_without_changing_goals(rig, tmp_path):
+    arm, bus = rig
+    arm.arm()
+    observed, latched = arm.motion_start()
+    session = Session(tmp_path)
+    session.robot, session.pose = arm, observed
+    session._start_manual(monotonic(), latched, practice=True)
+    goals = bus.reg["Goal_Position"].copy()
+    accelerations = bus.reg["Acceleration"].copy()
+    bus.calls.clear()
+
+    change_speed = Command(action="set_jog_speed", jog_speed=JogSpeed.FAST)
+    bus.reg["Present_Position"]["elbow_flex"] -= 42
+    with pytest.raises(WorkflowError, match="reach its hold position"):
+        session._command(change_speed)
+    assert not bus.calls
+    assert session.jog_speed == JogSpeed.PRECISION
+
+    bus.reg["Present_Position"].update(goals)
+    session.pose = arm.read()
+    session._command(change_speed)
+    assert session.motion.target == latched
+    assert bus.reg["Goal_Position"] == goals and arm.torque() == "on"
+    assert bus.reg["Acceleration"] == accelerations
+    assert [register for register, _ in bus.calls] == ["Goal_Speed", "Acceleration"]
+    assert bus.reg["Goal_Speed"] == {
+        joint: int((36 if joint == "gripper" else 37.5) * arm._steps_per_unit(joint))
+        for joint in JOINTS
+    }
 
 
 def test_manual_jog_keeps_idle_goals_fixed_under_varying_load(rig, tmp_path):

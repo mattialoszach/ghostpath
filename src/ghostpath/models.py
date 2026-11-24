@@ -41,6 +41,12 @@ class ReplayProfile(StrEnum):
     FAST = "fast"
 
 
+class JogSpeed(StrEnum):
+    PRECISION = "precision"
+    NORMAL = "normal"
+    FAST = "fast"
+
+
 class CameraSpec(StrictModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,23}$")
     source: int | str
@@ -116,6 +122,7 @@ class Command(StrictModel):
         "practice",
         "finish_practice",
         "take_over",
+        "set_jog_speed",
         "jog",
         "finish_manual",
         "stop_recording",
@@ -137,6 +144,7 @@ class Command(StrictModel):
     firm_carry_grip: bool | None = None
     grip_assist: bool = False
     grip_direction: Literal[-1, 0, 1] = 0
+    jog_speed: JogSpeed | None = None
     axes: dict[str, float] = Field(default_factory=dict, max_length=6)
     immediate_stop: bool = False
     path_id: str = ""

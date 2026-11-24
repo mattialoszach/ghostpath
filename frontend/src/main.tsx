@@ -271,7 +271,7 @@ function Workflow({ state, config, send, online, available }: {
         {state?.rest_target && <button className="button" disabled={!canReturn} onClick={park}><RotateCcw size={15} /> Return to rest</button>}
       </>
       extra = <>
-        <ManualControls send={send} enabled={available && !confirm} />
+        {state && <ManualControls state={state} send={send} enabled={available && !confirm} />}
         {!state?.rest_target && <p className="hint">To add a parking position, choose Done, then save the current position under Rest position.</p>}
       </>
       break
@@ -430,8 +430,8 @@ function Workflow({ state, config, send, online, available }: {
     {(controls || extra) && <div className="workflow-content">
       {controls && <div className="actions">{controls}</div>}
       {extra}
-      {(replayKeyboard || phase === 'manual') &&
-        <ManualControls send={send} enabled={online && !confirm} pending={!available} replaying={replayKeyboard} />}
+      {state && (replayKeyboard || phase === 'manual') &&
+        <ManualControls state={state} send={send} enabled={online && !confirm} pending={!available} replaying={replayKeyboard} />}
       {canManageRest && <details className="episode-options">
         <summary><ChevronDown size={14} /> Rest position<span>{state?.rest_target ? state.at_rest ? 'At rest' : 'Saved' : 'Not set'}</span></summary>
         <div>

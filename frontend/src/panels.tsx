@@ -5,7 +5,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { jogKeys, keyLabel } from './controls'
 import { camera, elapsed, humanize, jointLabels, joints, replayProfileLabels } from './types'
-import type { CameraSpec, Config, Joint, Send, State } from './types'
+import type { CameraSpec, Config, JogSpeed, Joint, Send, State } from './types'
 
 const modes = [
   { value: 'teach', label: 'Teach every episode' },
@@ -393,8 +393,8 @@ interface JogInput {
 
 const directionCodes = new Set<string>(Object.values(jogKeys).flat().map(key => key.code))
 
-export function ManualControls({ send, enabled, pending = false, replaying = false }: {
-  send: Send; enabled: boolean; pending?: boolean; replaying?: boolean
+export function ManualControls({ state, send, enabled, pending = false, replaying = false }: {
+  state: State; send: Send; enabled: boolean; pending?: boolean; replaying?: boolean
 }) {
   const panel = useRef<HTMLDivElement>(null)
   const input = useRef<JogInput | null>(null)
@@ -511,6 +511,14 @@ export function ManualControls({ send, enabled, pending = false, replaying = fal
     }}>
     <p>{replaying ? <>Hold <kbd>Space</kbd> and press a direction key to take over. Replay ends, but recording continues.</>
       : 'Hold a direction key or button to move. Release to ease to a stop.'}</p>
+    {!replaying && <label className="field">Jog speed
+      <select value={state.jog_speed} disabled={!canJog || !state.can_set_jog_speed || Object.keys(highlight).length > 0}
+        onChange={event => send('set_jog_speed', { jog_speed: event.target.value as JogSpeed })}>
+        <option value="precision">Precision · 1×</option>
+        <option value="normal">Normal · 2×</option>
+        <option value="fast">Fast · 3×</option>
+      </select>
+    </label>}
     <dl>{joints.map(joint => <div key={joint}>
       <dt>{jointLabels[joint]}</dt>
       {jogKeys[joint].map(({ code, label, value }) => <dd key={code}>
