@@ -1,7 +1,7 @@
 import signal
 import subprocess
 import sys
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic, sleep
 
 import numpy as np
@@ -79,7 +79,7 @@ def test_pairing_cannot_see_frames_that_were_not_yet_available():
     assert [frame.sequence for frame in manager.frames(stamp + 0.006, {}, {"workspace": 0})] == [1]
 
 
-@pytest.mark.parametrize(("buffer", "expected"), [(0.105, 0), (0.075, 1), (0.068, 2)])
+@pytest.mark.parametrize(("buffer", "expected"), [(0.105, 0), (0.075, 1), (0.068, 2), (0, 3)])
 def test_avfoundation_pairs_at_a_stable_input_delay(buffer, expected):
     manager = cameras.Cameras(
         [CameraSpec(name="workspace", source=0)], simulation=False, avfoundation_buffer=buffer
@@ -96,7 +96,10 @@ def test_avfoundation_pairs_at_a_stable_input_delay(buffer, expected):
     ))
     capture.history.append(cameras.CameraFrame(2, stamp - 0.07, image))
     capture.history.append(cameras.CameraFrame(
-        3, stamp - 0.069, image, available_timestamp=stamp + 0.030
+        3, stamp - 0.04, image, available_timestamp=stamp + 0.015
+    ))
+    capture.history.append(cameras.CameraFrame(
+        4, stamp - 0.03, image, available_timestamp=stamp + 0.030
     ))
     hits = manager.frames(stamp + 0.025, {}, {}, scheduled=stamp)
     assert [frame.sequence for frame in hits] == [expected]
@@ -114,6 +117,60 @@ def test_trace_observes_each_publication_even_after_history_evicts_frames():
     assert [frame.sequence for name, frame in published if name == "workspace"] == list(range(20))
     assert capture.history[0].sequence > 0
     assert all(not hasattr(frame, "pixels") for _, frame in published)
+
+
+def test_capture_does_not_wait_for_preview_and_discards_jpeg_from_old_stream(monkeypatch):
+    capture = cameras.Capture(CameraSpec(name="workspace", source=0, width=160, height=120))
+    pixels = np.zeros((120, 160, 3), dtype=np.uint8)
+    encoding, release, next_preview = Event(), Event(), Event()
+
+    def encode_preview(image, small):
+        if not encoding.is_set():
+            encoding.set()
+            assert release.wait(5)
+            return b"old stream"
+        assert capture.preview is None
+        next_preview.set()
+        return b"new stream"
+
+    monkeypatch.setattr(cameras, "jpeg", encode_preview)
+    monkeypatch.setattr(cameras, "PREVIEW_INTERVAL", 0.01)
+    capture.preview_thread.start()
+    try:
+        stamp = monotonic()
+        capture._publish(stamp, pixels, stamp)
+        assert encoding.wait(2)
+        capture._clear_stream("Disconnected")
+        stamp = monotonic()
+        capture._publish(stamp, pixels, stamp)
+        assert capture.candidates(monotonic(), -1)[0].sequence == 1
+        release.set()
+        assert next_preview.wait(2)
+        assert capture.preview_thread.is_alive()
+    finally:
+        release.set()
+        capture.closed.set()
+        capture.preview_thread.join(timeout=2)
+
+
+def test_fresh_arrival_does_not_hide_a_stale_camera_timestamp():
+    capture = cameras.Capture(CameraSpec(name="workspace", source=0, width=160, height=120))
+    arrival = monotonic()
+    capture._publish(arrival - 0.2, np.zeros((120, 160, 3), dtype=np.uint8), arrival)
+    assert not capture.status()["ready"]
+    assert capture.candidates(monotonic(), -1) == []
+
+
+def test_preflight_rejects_rates_that_cannot_supply_a_unique_frame_per_row():
+    spec = CameraSpec(name="workspace", source=0, width=160, height=120)
+    manager = cameras.Cameras([spec], simulation=False)
+    capture = manager.captures[spec.name]
+    stamp = monotonic()
+    capture._publish(stamp, np.zeros((120, 160, 3), dtype=np.uint8), stamp)
+    capture.actual = 29.5
+    with pytest.raises(cameras.CameraNotReady, match="capturing 29.5 FPS for a 30 FPS dataset"):
+        manager.check_recording(30)
+    assert manager.check_recording(20)[spec.name]["ready"]
 
 
 def test_pairing_comparison_accounts_for_frames_that_arrive_late_and_cannot_be_reused():
@@ -157,9 +214,9 @@ def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
     capture = cameras.Capture(CameraSpec(name="workspace", source=0, width=160, height=120))
     try:
         capture.thread = Thread(target=capture._run_macos, daemon=True)
-        capture.thread.start()
+        capture.open()
         wait_for(lambda: capture.live_preview() is not None)
-        with capture.condition:
+        with capture.lock:
             first = capture.history[-1]
 
         workers[0].send_signal(signal.SIGSTOP)
@@ -171,7 +228,7 @@ def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
 
         wait_for(lambda: len(workers) >= 2 and capture.live_preview() is not None)
         assert workers[0].poll() is not None
-        with capture.condition:
+        with capture.lock:
             recovered = capture.history[-1]
         assert recovered.sequence > first.sequence
         assert recovered.timestamp > first.timestamp
@@ -181,6 +238,7 @@ def test_restarts_blocked_camera_process_and_discards_stale_frames(monkeypatch):
         capture.closed.set()
         if capture.thread.is_alive():
             capture.thread.join(timeout=2)
+        capture.preview_thread.join(timeout=2)
         for worker in workers:
             if worker.poll() is None:
                 worker.kill()

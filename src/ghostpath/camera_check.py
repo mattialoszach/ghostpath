@@ -123,17 +123,22 @@ def _check_export(writer: Datasets, expected: int) -> dict:
     telemetry = dataset.hf_dataset.with_format(None).select_columns(
         [
             "ghostpath.camera_timestamps",
+            "ghostpath.camera_arrival_timestamps",
             "ghostpath.camera_available_timestamps",
             "ghostpath.encoder_read",
         ]
     )
-    cutoffs = np.asarray(telemetry["ghostpath.encoder_read"])[:, 1]
-    available = np.asarray(telemetry["ghostpath.camera_available_timestamps"]).reshape(
-        expected, len(recorded)
-    )
-    stamps = np.asarray(telemetry["ghostpath.camera_timestamps"]).reshape(expected, len(recorded))
-    if np.any(available > cutoffs[:, None]) or np.any(np.diff(stamps, axis=0) <= 0):
-        raise RuntimeError("Export includes late or reused camera frames.")
+    cutoffs = np.asarray(telemetry["ghostpath.encoder_read"])[:, 1, None]
+    shape = (expected, len(recorded))
+    stamps = np.asarray(telemetry["ghostpath.camera_timestamps"]).reshape(shape)
+    arrivals = np.asarray(telemetry["ghostpath.camera_arrival_timestamps"]).reshape(shape)
+    available = np.asarray(telemetry["ghostpath.camera_available_timestamps"]).reshape(shape)
+    if (
+        not np.isfinite([stamps, arrivals, available]).all()
+        or np.any(stamps > arrivals) or np.any(arrivals > available)
+        or np.any(available > cutoffs) or np.any(np.diff(stamps, axis=0) <= 0)
+    ):
+        raise RuntimeError("Export includes invalid, late or reused camera timestamps.")
     video_bytes = sum(file.stat().st_size for file in writer.root.rglob("*.mp4"))
     return {"dataset_fps": writer.config.fps, "video_bytes": video_bytes, **quality}
 
@@ -220,7 +225,7 @@ def main():
                 if export_error is None:
                     try:
                         writer.offer(Record(now, state, state, False))
-                    except RuntimeError as exc:
+                    except (RuntimeError, ValueError) as exc:
                         export_error = str(exc)
                 rows += 1
             remaining = finish - time.monotonic()

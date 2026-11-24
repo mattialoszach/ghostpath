@@ -152,11 +152,13 @@ export function SetupPanel({ config, change, connect, available }: {
           <p className="hint" id="replay-timing-hint">Replay can run slower than the target pace to stay within these limits.</p>
           {config.device === 'so101' && <>
             {recorded > 0 && <label className="field">Camera timing (macOS)
-              <select value={config.mac_camera_buffer_ms} onChange={e => set('mac_camera_buffer_ms', e.target.value === '68' ? 68 : 75)} aria-describedby="camera-timing-hint">
+              <select value={config.mac_camera_buffer_ms} onChange={e => set('mac_camera_buffer_ms', Number(e.target.value) as Config['mac_camera_buffer_ms'])} aria-describedby="camera-timing-hint">
                 <option value={75}>Standard buffer · 75 ms</option>
                 <option value={68}>Lower delay · 68 ms</option>
+                <option value={60}>Lower delay · 60 ms</option>
+                <option value={0}>Newest available · no extra buffer</option>
               </select>
-              <small className="hint" id="camera-timing-hint">Try Lower delay on a pilot take. Use it for collection only if you see no skipped samples.</small>
+              <small className="hint" id="camera-timing-hint">Lower delay can increase gaps. Compare camera age and skew on pilot takes before collecting.</small>
             </label>}
             <label className="field">Calibration directory<input value={config.calibration_dir ?? ''} onChange={e => set('calibration_dir', e.target.value || null)} placeholder="Default LeRobot directory" /></label>
             <label className="check"><input type="checkbox" checked={config.automatic_reset} onChange={e => set('automatic_reset', e.target.checked)} /> Allow automatic arm reset</label>
@@ -337,7 +339,7 @@ export function ReviewMetrics({ state }: { state: State }) {
       <div><span>Frames at {state.config.fps} FPS</span><strong>{quality.frames}</strong></div>
       <div><span>Dataset duration</span><strong>{quality.seconds.toFixed(2)} s</strong></div>
     </div>
-    {!!quality.discontinuities?.length && <p className="hint">This take has camera gaps. Exclude it from training unless your loader respects segment boundaries.</p>}
+    {!!quality.skipped_camera_samples && <p className="hint">This take skipped camera samples. Retry it for a continuous training episode.</p>}
     <details className="episode-options">
       <summary><ChevronDown size={14} /> Capture and tracking details</summary>
       <div>
@@ -357,11 +359,13 @@ export function ReviewMetrics({ state }: { state: State }) {
           </>}
           <div><span>Max frame gap</span><strong>{quality.max_gap_ms} ms</strong></div>
           {cameraCount > 1 && <div><span>Max camera-to-camera skew</span><strong>{quality.camera_skew_ms} ms</strong></div>}
+          {quality.encoder_read_ms && <div><span>Encoder read · p95</span><strong>{quality.encoder_read_ms.p95} ms</strong></div>}
+          {quality.writer_queue_ms && <div><span>Writer queue · p95</span><strong>{quality.writer_queue_ms.p95} ms</strong></div>}
           <div><span>Peak arm command-to-encoder gap</span><strong>{quality.max_arm_error_deg}°</strong></div>
           <div><span>Peak gripper command-to-encoder gap</span><strong>{quality.max_gripper_error_pct}%</strong></div>
         </div>
         <p className="hint">The nominal dataset frame gap is {Number((1000 / state.config.fps).toFixed(1))} ms. {cameraCount > 0 && 'Image age is measured at encoder read end. Timing uses camera presentation timestamps on macOS and host read times elsewhere, not measured exposure times.'}</p>
-        {Object.entries(quality.camera_timing ?? {}).map(([name, capture]) => <p key={name} className="hint"><strong>{humanize(name)}</strong>{capture.fps != null && ` · ${capture.fps} camera FPS vs ${state.config.fps} dataset FPS`}: image age {capture.image_age_ms.p50} ms median, {capture.image_age_ms.p95} ms p95, {capture.image_age_ms.max} ms max. Median delivery {capture.delivery_ms.p50} ms; median wait after delivery {capture.wait_ms.p50} ms.</p>)}
+        {Object.entries(quality.camera_timing ?? {}).map(([name, capture]) => <p key={name} className="hint"><strong>{humanize(name)}</strong>{capture.fps != null && ` · ${capture.fps} camera FPS vs ${state.config.fps} dataset FPS`}: image age {capture.image_age_ms.p50} ms median, {capture.image_age_ms.p95} ms p95, {capture.image_age_ms.max} ms max. {capture.camera_callback_ms && capture.app_delivery_ms && capture.arrival_lead_ms ? `Median camera timestamp to callback: ${capture.camera_callback_ms.p50} ms; callback to available: ${capture.app_delivery_ms.p50} ms. Camera callback preceded encoder read end by ${capture.arrival_lead_ms.p50} ms (median).` : `Median delivery ${capture.delivery_ms.p50} ms; median wait after delivery ${capture.wait_ms.p50} ms.`}</p>)}
         {quality.arm_path_peak?.excursion_ms != null && <p className="hint">Around the peak, {jointLabels[quality.arm_path_peak.joint]} was at least {quality.arm_path_peak.excursion_deg}° off the reference for {quality.arm_path_peak.excursion_ms > 0 ? `${quality.arm_path_peak.excursion_ms} ms` : 'one control tick'}.</p>}
         {quality.max_arm_path_error_deg != null && <p className="hint">Path error compares encoder readings with the replay reference at the same sample time. Servo commands can aim ahead of that reference.</p>}
       </div>

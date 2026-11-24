@@ -1,4 +1,5 @@
 import json
+from threading import Event
 from time import monotonic
 
 import numpy as np
@@ -120,6 +121,14 @@ def test_rejects_out_of_order_rather_than_manufacturing_a_frame(writer):
     assert writer.accepted == 0
 
 
+def test_rejects_an_invalid_encoder_read_interval(writer):
+    writer.prepare().result(timeout=30)
+    pose = SimulatedFollower(CONTROL).read()
+    writer.offer(Record(100, pose, pose, False, encoder_read=(100.002, 100.001)))
+    with pytest.raises(ValueError, match="invalid encoder read interval"):
+        writer.seal().result(timeout=30)
+
+
 def test_preflight_roundtrips_images_and_causal_timestamps(writer):
     stage(writer)
     result = _check_export(writer, expected=6)
@@ -142,6 +151,25 @@ def test_rejects_video_and_telemetry_frame_count_mismatch(writer, monkeypatch):
 
     monkeypatch.setattr(writer.dataset, "save_episode", save_with_mismatch)
     with pytest.raises(RuntimeError, match="encoder lost video frames"):
+        writer.save("invalid", "teach").result(timeout=30)
+    assert not writer._output_files()
+    assert not (writer.root / "ghostpath.json").exists()
+
+
+def test_rejects_a_truncated_telemetry_table(writer, monkeypatch):
+    import pyarrow.parquet as pq
+
+    stage(writer)
+    finalize = writer.dataset.finalize
+
+    def finalize_with_truncated_telemetry():
+        finalize()
+        if tables := sorted((writer.root / "data").rglob("*.parquet")):
+            table = pq.read_table(tables[-1])
+            pq.write_table(table.slice(0, table.num_rows - 1), tables[-1])
+
+    monkeypatch.setattr(writer.dataset, "finalize", finalize_with_truncated_telemetry)
+    with pytest.raises(RuntimeError, match="expected number of telemetry rows"):
         writer.save("invalid", "teach").result(timeout=30)
     assert not writer._output_files()
     assert not (writer.root / "ghostpath.json").exists()
@@ -171,6 +199,45 @@ def load_camera_history(store, stamp, streams):
         for i, offset in enumerate(offsets):
             pixels = np.full((120, 160, 3), 20 * i, dtype=np.uint8)
             capture.history.append(CameraFrame(i, stamp + offset, pixels))
+
+
+def test_writer_uses_original_camera_frames_even_when_history_is_evicted(physical_writer):
+    store = physical_writer
+    first = monotonic() - 0.20
+    read_centers = [first + index / 20 for index in range(3)]
+    for capture in store.cameras.captures.values():
+        capture.actual = 30.0
+        for index, stamp in enumerate(read_centers):
+            capture.history.append(CameraFrame(
+                index, stamp - 0.060, np.full((120, 160, 3), index * 100, dtype=np.uint8),
+                arrival_timestamp=stamp - 0.010, available_timestamp=stamp - 0.008,
+            ))
+        capture.history.append(CameraFrame(
+            len(read_centers), read_centers[-1] - 0.020, np.zeros((120, 160, 3), dtype=np.uint8),
+            arrival_timestamp=read_centers[-1], available_timestamp=read_centers[-1] + 0.002,
+        ))
+    store.prepare().result(timeout=30)
+    pose = SimulatedFollower(CONTROL).read()
+    release = Event()
+    blocker = store.executor.submit(release.wait, 5)
+    try:
+        for stamp in read_centers:
+            store.offer(Record(stamp, pose, pose, False, encoder_read=(stamp - .001, stamp + .001)))
+        for capture in store.cameras.captures.values():
+            capture.history.clear()
+    finally:
+        release.set()
+    assert blocker.result(timeout=5)
+    quality = store.seal().result(timeout=30)
+    assert quality["skipped_camera_samples"] == 0
+    assert quality["frames"] == len(read_centers)
+    assert quality["encoder_read_ms"]["p50"] == 2.0
+    timing = quality["camera_timing"]["workspace"]
+    assert timing["image_age_ms"]["max"] == 61.0
+    assert timing["camera_callback_ms"]["p50"] == 50.0
+    assert timing["app_delivery_ms"]["p50"] == 2.0
+    assert timing["arrival_lead_ms"]["p50"] == 11.0
+    assert timing["wait_ms"]["p50"] == 9.0
 
 
 @pytest.mark.parametrize(

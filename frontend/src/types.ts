@@ -28,7 +28,7 @@ export interface Config {
   task: string
   dataset: string
   fps: number
-  mac_camera_buffer_ms: 75 | 68
+  mac_camera_buffer_ms: 75 | 68 | 60 | 0
   speed: number
   replay_profile: ReplayProfile
   mode: Mode
@@ -45,11 +45,16 @@ export interface Quality {
   skipped_camera_samples?: number
   discontinuities?: number[]
   sensor_offset_ms: number
+  encoder_read_ms?: TimingStats | null
+  writer_queue_ms?: TimingStats
   camera_offset_ms?: Record<string, { p1: number; p50: number; p95: number; p99: number }>
   camera_timing?: Record<string, {
     fps: number | null
     image_age_ms: TimingStats
     delivery_ms: TimingStats
+    camera_callback_ms?: TimingStats
+    app_delivery_ms?: TimingStats
+    arrival_lead_ms?: TimingStats
     wait_ms: TimingStats
   }>
   max_arm_error_deg: number

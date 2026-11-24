@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from threading import Condition, Event, Thread
+from threading import Event, Lock, Thread
 
 import numpy as np
 from PIL import Image
@@ -22,11 +22,11 @@ from .models import CameraSpec
 from .motion import Pose
 from .preview import render_camera
 
-STALE_AFTER = 0.30
 REOPEN_DELAY = 1.0
 MAX_FRAME_AGE = 0.175
 AVFOUNDATION_BUFFER = 0.075
 FRAME_HISTORY_SIZE = 12
+PREVIEW_INTERVAL = 0.14
 
 
 class CameraNotReady(ValueError):
@@ -159,18 +159,25 @@ class Capture:
     ):
         self.spec = spec
         self.on_frame = on_frame
-        self.condition = Condition()
+        self.lock = Lock()
         self.history: deque[CameraFrame] = deque(maxlen=FRAME_HISTORY_SIZE)
         self.cadence: deque[float] = deque(maxlen=1 + 3 * spec.capture_fps)
         self.closed = Event()
         self.preview: bytes | None = None
-        self.last_preview = 0.0
+        self.stream_generation = 0
         self.problem = ""
         self.actual: float | None = None
         self.mode: dict | None = None
         self.retrying = False
         self.sequence = 0
         self.thread = Thread(target=self._run, name=f"camera-{spec.name}", daemon=True)
+        self.preview_thread = Thread(
+            target=self._preview_loop, name=f"camera-preview-{spec.name}", daemon=True
+        )
+
+    def open(self):
+        self.thread.start()
+        self.preview_thread.start()
 
     def _run(self):
         try:
@@ -257,22 +264,22 @@ class Capture:
         return data
 
     def _mode(self, mode: dict):
-        with self.condition:
+        with self.lock:
             self.mode = mode
 
     def _publish(self, stamp: float, pixels: np.ndarray, arrival: float):
-        with self.condition:
+        pixels.setflags(write=False)
+        with self.lock:
+            available = time.monotonic()
+            if not (math.isfinite(stamp) and stamp <= arrival <= available):
+                raise RuntimeError("The camera delivered timestamps out of order.")
             if self.cadence and stamp <= self.cadence[-1]:
                 return
-            available = time.monotonic()
             self.history.append(CameraFrame(
                 self.sequence, stamp, pixels,
                 arrival_timestamp=arrival, available_timestamp=available,
             ))
-            if self.on_frame is not None:
-                self.on_frame(self.spec.name, CameraTiming(
-                    self.sequence, stamp, arrival_timestamp=arrival, available_timestamp=available
-                ))
+            sequence = self.sequence
             self.cadence.append(stamp)
             self.sequence += 1
             self.problem = ""
@@ -280,42 +287,56 @@ class Capture:
             span = stamp - self.cadence[0]
             if span >= 1:
                 self.actual = (len(self.cadence) - 1) / span
-            self.condition.notify_all()
-        if available - self.last_preview >= 0.14:
-            preview = jpeg(Image.fromarray(pixels), small=True)
-            with self.condition:
-                self.preview = preview
-                self.last_preview = available
+        if self.on_frame is not None:
+            self.on_frame(self.spec.name, CameraTiming(
+                sequence, stamp, arrival_timestamp=arrival, available_timestamp=available
+            ))
+
+    def _preview_loop(self):
+        last_sequence = -1
+        while not self.closed.is_set():
+            with self.lock:
+                frame = self.history[-1] if self._fresh(time.monotonic()) else None
+                generation = self.stream_generation
+            if frame is not None and frame.sequence != last_sequence:
+                try:
+                    preview = jpeg(Image.fromarray(frame.pixels), small=True)
+                except (OSError, ValueError):
+                    preview = None
+                with self.lock:
+                    if generation == self.stream_generation:
+                        self.preview = preview
+                last_sequence = frame.sequence
+            self.closed.wait(PREVIEW_INTERVAL)
 
     def _clear_stream(self, problem: str, *, retrying: bool = False):
-        with self.condition:
+        with self.lock:
             self.problem = problem
             self.retrying = retrying
             self.history.clear()
             self.cadence.clear()
             self.preview = None
-            self.last_preview = 0.0
+            self.stream_generation += 1
             self.actual = None
             self.mode = None
-            self.condition.notify_all()
 
     def _fresh(self, now: float) -> bool:
         return bool(
             not self.closed.is_set()
             and self.history
-            and now - self.history[-1].available < STALE_AFTER
+            and now - self.history[-1].timestamp <= MAX_FRAME_AGE
             and not self.problem
         )
 
     def live_preview(self) -> bytes | None:
-        with self.condition:
+        with self.lock:
             return self.preview if self._fresh(time.monotonic()) else None
 
     def candidates(
         self, cutoff: float, after: int, *,
         scheduled: float | None = None, buffer: float = AVFOUNDATION_BUFFER,
     ) -> list[CameraFrame]:
-        with self.condition:
+        with self.lock:
             if self.closed.is_set() or self.problem:
                 raise ValueError(f"{self.spec.name}: {self.problem or 'camera capture closed'}")
             if not self.mode or self.mode.get("timestamp_source") != "avfoundation_pts":
@@ -325,7 +346,7 @@ class Capture:
             )
 
     def status(self) -> dict:
-        with self.condition:
+        with self.lock:
             ready = self._fresh(time.monotonic())
             return {
                 "ready": ready,
@@ -347,6 +368,7 @@ class Cameras:
         self.recorded = [s for s in specs if s.record]
         self.simulation = simulation
         self.avfoundation_buffer = avfoundation_buffer
+        self.tolerance = pairing_tolerance(self.recorded) if self.recorded else 0.0
         self.captures = {} if simulation else {s.name: Capture(s, on_frame) for s in specs}
         self.indices = {s.name: i for i, s in enumerate(specs)}
         self.previews: dict[str, bytes] = {}
@@ -359,7 +381,7 @@ class Cameras:
             self.thread.start()
         else:
             for capture in self.captures.values():
-                capture.thread.start()
+                capture.open()
 
     def _simulate_preview(self):
         while not self.closed.is_set():
@@ -369,7 +391,7 @@ class Cameras:
                     s.name: jpeg(render_camera(pose, 480, 360, self.indices[s.name]))
                     for s in self.specs
                 }
-            self.closed.wait(0.14)
+            self.closed.wait(PREVIEW_INTERVAL)
 
     def preview(self, name: str) -> bytes | None:
         capture = self.captures.get(name)
@@ -391,7 +413,7 @@ class Cameras:
                 raise CameraNotReady(f"{spec.name}: {status['problem'] or 'waiting for camera'}")
             if not status["fps"]:
                 raise CameraNotReady(f"{spec.name}: camera is warming up. Try again in a moment.")
-            if status["fps"] < fps * 0.95:
+            if status["fps"] < fps:
                 raise CameraNotReady(
                     f"{spec.name}: capturing {status['fps']:g} FPS for a {fps} FPS dataset. "
                     "Lower the dataset FPS."
@@ -425,7 +447,6 @@ class Cameras:
                 for spec in self.recorded
             ]
 
-        tolerance = pairing_tolerance(self.recorded)
         groups = []
         for spec in self.recorded:
             frames = self.captures[spec.name].candidates(
@@ -437,18 +458,20 @@ class Cameras:
                     f"{spec.name}: no fresh, unused camera frame at the observation cutoff"
                 )
             groups.append(frames)
-        if match := latest_match(groups, tolerance):
+        if match := latest_match(groups, self.tolerance):
             return match
         raise CameraSyncError(
-            f"Camera-to-camera skew exceeds {tolerance * 1000:.0f} ms at the observation cutoff."
+            f"Camera-to-camera skew exceeds {self.tolerance * 1000:.0f} ms "
+            "at the observation cutoff."
         )
 
     def close(self):
         self.closed.set()
         for capture in self.captures.values():
             capture.closed.set()
-            with capture.condition:
-                capture.condition.notify_all()
-        for thread in (self.thread, *(c.thread for c in self.captures.values())):
+        workers = [self.thread]
+        for capture in self.captures.values():
+            workers.extend((capture.thread, capture.preview_thread))
+        for thread in workers:
             if thread.is_alive():
                 thread.join(timeout=0.7 if sys.platform == "darwin" else 0.25)

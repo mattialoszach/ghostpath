@@ -2,6 +2,7 @@
 
 import math
 import shutil
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
@@ -13,13 +14,23 @@ from threading import BoundedSemaphore
 import numpy as np
 from PIL import Image
 
-from .cameras import MAX_FRAME_AGE, Cameras, CameraSyncError, jpeg, pairing_tolerance, timing_stats
+from .cameras import (
+    MAX_FRAME_AGE,
+    CameraFrame,
+    Cameras,
+    CameraSyncError,
+    jpeg,
+    pairing_tolerance,
+    timing_stats,
+)
 from .models import Configuration
 from .motion import JOINTS, Pose, validate_pose
 from .poses import write_json
 
 MIN_CAMERA_GAP_INTERVAL = 2.0
 ARM_EXCURSION_DEG = 3.0
+MAX_PENDING_RECORDS = 18
+PENDING_IMAGE_BYTES = 96 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,15 @@ class Record:
     @property
     def cutoff(self) -> float:
         return self.encoder_read[1] if self.encoder_read is not None else self.timestamp
+
+
+@dataclass(frozen=True)
+class CameraObservation:
+    sequence: int
+    stamp: float
+    arrival: float
+    available: float
+    cutoff: float
 
 
 def _feature(dtype: str, names: list[str]) -> dict:
@@ -70,7 +90,10 @@ class Datasets:
         self.dataset = None
         self.created = False
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset")
-        self.slots = BoundedSemaphore(18)
+        image_bytes = sum(spec.width * spec.height * 3 for spec in cameras.recorded)
+        self.slots = BoundedSemaphore(
+            max(1, min(MAX_PENDING_RECORDS, PENDING_IMAGE_BYTES // max(1, image_bytes)))
+        )
         self.error: str | None = None
         self.broken = False
         self.stopped_early = False
@@ -86,10 +109,14 @@ class Datasets:
         self.path_frames = 0
         self.max_arm_path_error = self.max_gripper_path_error = 0.0
         self.replay_timing: dict[str, float] | None = None
-        self.indices: dict[str, int] = {}
+        self.capture_origin: float | None = None
+        self.capture_index = 0
+        self.camera_sequences: dict[str, int] = {}
         self.camera_modes: dict = {}
         self.camera_offsets: dict[str, list[float]] = {}
-        self.camera_timings: dict[str, list[tuple[int, float, float, float]]] = {}
+        self.camera_timings: dict[str, list[CameraObservation]] = {}
+        self.writer_queue_delays: list[float] = []
+        self.encoder_durations: list[float] = []
         self.discontinuities: list[int] = []
         self.last_saved_index = -1
         self.arm_path_peak: dict | None = None
@@ -170,26 +197,60 @@ class Datasets:
         self.created = True
 
     def offer(self, record: Record):
+        """Pin causal frames before handing the row to the asynchronous writer."""
         if self.error:
             raise RuntimeError(self.error)
         if not self.slots.acquire(blocking=False):
             raise RuntimeError("Dataset writer fell behind. Lower FPS or camera resolution.")
-        self.executor.submit(self._consume, record)
+        try:
+            if self.capture_origin is None:
+                self.capture_origin = record.timestamp
+            captures = []
+            gap = None
+            if self.cameras.recorded and not self.cameras.simulation:
+                try:
+                    captures = self.cameras.frames(
+                        record.cutoff, record.state, self.camera_sequences,
+                        scheduled=self.capture_origin + self.capture_index / self.config.fps,
+                    )
+                except CameraSyncError as exc:
+                    gap = str(exc)
+            self.executor.submit(self._consume, record, captures, gap, time.monotonic())
+        except BaseException:
+            self.slots.release()
+            raise
+        self.capture_index += 1
+        if captures:
+            self.camera_sequences.update(
+                (spec.name, capture.sequence)
+                for spec, capture in zip(self.cameras.recorded, captures, strict=True)
+            )
 
-    def _consume(self, record: Record):
+    def _consume(
+        self, record: Record, captures: list[CameraFrame], gap: str | None, queued_at: float
+    ):
         try:
             if not self.error:
-                self._add(record)
+                self.writer_queue_delays.append(time.monotonic() - queued_at)
+                self._add(record, captures, gap)
         except Exception as exc:
             self.error = f"Capture validation failed: {exc}"
         finally:
             self.slots.release()
 
-    def _add(self, record: Record):
+    def _add(self, record: Record, captures: list[CameraFrame], camera_gap: str | None):
         period = 1 / self.config.fps
         stamp = record.timestamp
         if not math.isfinite(stamp):
             raise ValueError("invalid telemetry timestamp")
+        if record.encoder_read is not None:
+            read_start, read_end = record.encoder_read
+            if not (
+                math.isfinite(read_start) and math.isfinite(read_end)
+                and read_start <= stamp <= read_end
+            ):
+                raise ValueError("invalid encoder read interval")
+            self.encoder_durations.append(read_end - read_start)
         if not self.samples:
             self.started = stamp
         else:
@@ -200,24 +261,21 @@ class Datasets:
         self.last_sample = stamp
         self.samples += 1
         state, action = validate_pose(record.state), validate_pose(record.action)
-        try:
-            captures = self.cameras.frames(
-                record.cutoff,
-                state,
-                self.indices,
-                scheduled=self.started + (self.samples - 1) * period,
-            )
-        except CameraSyncError as exc:
+        if camera_gap is not None:
             if (
                 self.last_camera_gap is not None
                 and stamp - self.last_camera_gap < MIN_CAMERA_GAP_INTERVAL
             ):
-                raise ValueError(f"Repeated camera gaps: {exc}") from exc
+                raise ValueError(f"Repeated camera gaps: {camera_gap}")
             self.last_camera_gap = stamp
             self.skipped_camera_samples += 1
             return
 
         sample_index = self.samples - 1
+        if self.cameras.simulation:
+            captures = self.cameras.frames(
+                record.cutoff, state, dict.fromkeys(self.camera_modes, sample_index - 1),
+            )
         if self.frames:
             self.max_gap = max(self.max_gap, stamp - self.last_saved)
             if sample_index != self.last_saved_index + 1:
@@ -263,9 +321,9 @@ class Datasets:
         for spec, capture in zip(self.cameras.recorded, captures, strict=True):
             times.append(capture.timestamp)
             self.camera_offsets[spec.name].append((capture.timestamp - stamp) * 1000)
-            self.camera_timings[spec.name].append((
-                capture.sequence, capture.timestamp, capture.available - capture.timestamp,
-                record.cutoff - capture.available,
+            self.camera_timings[spec.name].append(CameraObservation(
+                capture.sequence, capture.timestamp, capture.arrived, capture.available,
+                record.cutoff,
             ))
             if capture.pixels.shape != (spec.height, spec.width, 3):
                 raise ValueError(f"{spec.name}: unexpected frame dimensions")
@@ -288,10 +346,6 @@ class Datasets:
                 [capture.available - self.started for capture in captures], np.float64
             )
         self.dataset.add_frame(frame)
-        self.indices.update(
-            (spec.name, capture.sequence)
-            for spec, capture in zip(self.cameras.recorded, captures, strict=True)
-        )
         for name, pixels in previews:
             path = Path(self.review_dir.name) / f"{name}-{self.review_frames}.jpg"
             path.write_bytes(jpeg(Image.fromarray(pixels), small=True))
@@ -358,16 +412,17 @@ class Datasets:
         for name, samples in self.camera_timings.items():
             if not samples:
                 continue
-            sequences, stamps, delivery, wait = zip(*samples, strict=True)
-            span = stamps[-1] - stamps[0]
+            first, last = samples[0], samples[-1]
+            span = last.stamp - first.stamp
             result[name] = {
-                "fps": round((sequences[-1] - sequences[0]) / span, 2)
+                "fps": round((last.sequence - first.sequence) / span, 2)
                 if span > 0 and not self.cameras.simulation else None,
-                "image_age_ms": timing_stats(
-                    delivered + waited for delivered, waited in zip(delivery, wait, strict=True)
-                ),
-                "delivery_ms": timing_stats(delivery),
-                "wait_ms": timing_stats(wait),
+                "image_age_ms": timing_stats(row.cutoff - row.stamp for row in samples),
+                "delivery_ms": timing_stats(row.available - row.stamp for row in samples),
+                "camera_callback_ms": timing_stats(row.arrival - row.stamp for row in samples),
+                "app_delivery_ms": timing_stats(row.available - row.arrival for row in samples),
+                "arrival_lead_ms": timing_stats(row.cutoff - row.arrival for row in samples),
+                "wait_ms": timing_stats(row.cutoff - row.available for row in samples),
             }
         return result
 
@@ -376,6 +431,10 @@ class Datasets:
             raise ValueError(self.error)
         if self.frames < 3:
             raise ValueError("The episode has too few frames.")
+        encoder_durations = [
+            tick.encoder_read[1] - tick.encoder_read[0]
+            for tick in self.control_trace if tick.encoder_read is not None
+        ] or self.encoder_durations
         return {
             "stopped_early": self.stopped_early,
             "frames": self.frames,
@@ -397,6 +456,8 @@ class Datasets:
             },
             "sensor_offset_ms": round(self.max_sensor_offset * 1000, 1),
             "camera_timing": self._camera_quality(),
+            "encoder_read_ms": timing_stats(encoder_durations) if encoder_durations else None,
+            "writer_queue_ms": timing_stats(self.writer_queue_delays),
             "max_arm_error_deg": round(self.max_arm_error, 2),
             "max_gripper_error_pct": round(self.max_gripper_error, 2),
             "max_arm_path_error_deg": (
@@ -482,7 +543,9 @@ class Datasets:
                 dataset.finalize()
                 if dataset.meta.total_episodes != self.accepted + 1:
                     raise RuntimeError("LeRobot did not commit the expected episode index.")
-                self._verify_videos(self._output_files() - accepted_before)
+                new_files = self._output_files() - accepted_before
+                self._verify_videos(new_files)
+                self._verify_telemetry(new_files)
                 if self.control_trace:
                     self._write_control(trace_path)
                 write_json(
@@ -537,14 +600,31 @@ class Datasets:
         import av
 
         videos = [path for path in new_files if path.suffix == ".mp4"]
-        if len(videos) != len(self.cameras.recorded):
+        expected = {f"observation.images.{spec.name}": spec for spec in self.cameras.recorded}
+        views = {path.parents[1].name for path in videos}
+        if len(videos) != len(expected) or views != expected.keys():
             raise RuntimeError("The encoder did not save a video for every recorded camera.")
         for path in videos:
             with av.open(str(path)) as container:
-                if container.streams.video[0].frames != self.frames:
+                (stream,) = container.streams.video
+                spec = expected[path.parents[1].name]
+                if (stream.width, stream.height) != (spec.width, spec.height):
+                    raise RuntimeError(f"{spec.name}: encoded video has unexpected dimensions.")
+                if stream.frames != self.frames:
                     raise RuntimeError(
                         "The encoder lost video frames. Lower camera resolution or dataset FPS."
                     )
+
+    def _verify_telemetry(self, new_files: set[Path]):
+        from pyarrow.parquet import ParquetFile
+
+        tables = [path for path in new_files if path.suffix == ".parquet"]
+        rows = 0
+        for path in tables:
+            with ParquetFile(path) as parquet:
+                rows += parquet.metadata.num_rows
+        if rows != self.frames:
+            raise RuntimeError("The dataset did not save the expected number of telemetry rows.")
 
     def _write_control(self, path: Path):
         def relative(window):
@@ -598,10 +678,14 @@ class Datasets:
             self.dataset.clear_episode_buffer()
         self.error = None
         self.frames = 0
-        self.indices.clear()
+        self.capture_origin = None
+        self.capture_index = 0
+        self.camera_sequences.clear()
         self.camera_modes = {}
         self.camera_offsets = {}
         self.camera_timings = {}
+        self.writer_queue_delays = []
+        self.encoder_durations = []
         self.discontinuities = []
         self.last_saved_index = -1
         self.arm_path_peak = None
@@ -632,7 +716,7 @@ class Datasets:
 
     def review(self, name: str, index: int) -> bytes | None:
         directory = self.review_dir
-        if not directory or name not in self.indices or not 0 <= index < self.review_frames:
+        if not directory or name not in self.camera_modes or not 0 <= index < self.review_frames:
             return None
         try:
             return (Path(directory.name) / f"{name}-{index}.jpg").read_bytes()
