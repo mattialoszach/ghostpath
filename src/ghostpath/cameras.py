@@ -18,13 +18,13 @@ import numpy as np
 from PIL import Image
 
 from .camera_worker import HEADER, MAX_MESSAGE, capture_frames
-from .models import CameraSpec
+from .models import DEFAULT_MAC_CAMERA_BUFFER_MS, CameraSpec
 from .motion import Pose
 from .preview import render_camera
 
 REOPEN_DELAY = 1.0
 MAX_FRAME_AGE = 0.175
-AVFOUNDATION_BUFFER = 0.075
+AVFOUNDATION_BUFFER = DEFAULT_MAC_CAMERA_BUFFER_MS / 1000
 FRAME_HISTORY_SIZE = 12
 PREVIEW_INTERVAL = 0.14
 

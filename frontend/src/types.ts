@@ -149,7 +149,7 @@ export const camera = (name: string, source: number): CameraSpec => ({
 export const defaults: Config = {
   device: 'simulation', port: '', robot_id: 'my_awesome_follower_arm', calibration_dir: null,
   task: 'Pick up the orange block and place it in the tray', dataset: 'block-placement',
-  fps: 20, mac_camera_buffer_ms: 75, speed: 1, replay_profile: 'standard', mode: 'teach', automatic_reset: false,
+  fps: 20, mac_camera_buffer_ms: 60, speed: 1, replay_profile: 'standard', mode: 'teach', automatic_reset: false,
   cameras: [camera('workspace', 0), camera('wrist', 1)],
 }
 

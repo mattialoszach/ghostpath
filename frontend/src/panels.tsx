@@ -153,12 +153,12 @@ export function SetupPanel({ config, change, connect, available }: {
           {config.device === 'so101' && <>
             {recorded > 0 && <label className="field">Camera timing (macOS)
               <select value={config.mac_camera_buffer_ms} onChange={e => set('mac_camera_buffer_ms', Number(e.target.value) as Config['mac_camera_buffer_ms'])} aria-describedby="camera-timing-hint">
-                <option value={75}>Standard buffer · 75 ms</option>
-                <option value={68}>Lower delay · 68 ms</option>
-                <option value={60}>Lower delay · 60 ms</option>
-                <option value={0}>Newest available · no extra buffer</option>
+                <option value={60}>Low latency (default) · 60 ms</option>
+                <option value={68}>More jitter tolerance · 68 ms</option>
+                <option value={75}>Most jitter tolerance · 75 ms</option>
+                <option value={0}>Experimental · no extra buffer</option>
               </select>
-              <small className="hint" id="camera-timing-hint">Lower delay can increase gaps. Compare camera age and skew on pilot takes before collecting.</small>
+              <small className="hint" id="camera-timing-hint">The buffer is not the measured image age. Switch to 68 ms if a pilot take has camera gaps.</small>
             </label>}
             <label className="field">Calibration directory<input value={config.calibration_dir ?? ''} onChange={e => set('calibration_dir', e.target.value || null)} placeholder="Default LeRobot directory" /></label>
             <label className="check"><input type="checkbox" checked={config.automatic_reset} onChange={e => set('automatic_reset', e.target.checked)} /> Allow automatic arm reset</label>

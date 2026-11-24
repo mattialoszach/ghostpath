@@ -22,7 +22,7 @@ from .cameras import (
     timing_stats,
 )
 from .dataset import Datasets, Record, load_dataset_backend
-from .models import CameraSpec, Configuration
+from .models import DEFAULT_MAC_CAMERA_BUFFER_MS, CameraSpec, Configuration
 from .motion import JOINTS
 
 BUFFER_OPTIONS_MS = (105, 90, 75, 68, 60, 0)
@@ -155,7 +155,7 @@ def main():
     parser.add_argument("--timing-trace", type=Path, help="Save timing metadata without images")
     parser.add_argument(
         "--buffer-ms", type=int, choices=BUFFER_OPTIONS_MS,
-        help="Override the macOS buffer for the temporary export",
+        help=f"Override the macOS buffer (default: {DEFAULT_MAC_CAMERA_BUFFER_MS} ms)",
     )
     args = parser.parse_args()
     if args.seconds < 2:

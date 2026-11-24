@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+DEFAULT_MAC_CAMERA_BUFFER_MS = 60
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -56,7 +58,7 @@ class Configuration(StrictModel):
     task: str = Field(default="Pick up the orange block and place it in the tray", max_length=500)
     dataset: str = Field(default="block-placement", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     fps: int = Field(default=20, ge=10, le=30)
-    mac_camera_buffer_ms: Literal[75, 68, 60, 0] = 75
+    mac_camera_buffer_ms: Literal[75, 68, 60, 0] = DEFAULT_MAC_CAMERA_BUFFER_MS
     speed: float = Field(default=1.0, ge=0.25, le=2)
     replay_profile: ReplayProfile = ReplayProfile.STANDARD
     mode: Mode = Mode.TEACH
