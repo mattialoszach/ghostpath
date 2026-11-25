@@ -6,6 +6,8 @@ export type Phase = 'setup' | 'ready' | 'practice' | 'teaching' | 'teach_paused'
 export type Mode = 'teach' | 'repeat' | 'hybrid'
 export type ReplayProfile = 'standard' | 'fast'
 export type JogSpeed = 'precision' | 'normal' | 'fast'
+export type SavedKind = 'rest' | 'recording'
+export type SavedItem = { id: string; label: string; modified: string; episodes: number | null }
 
 export const replayProfileLabels: Record<ReplayProfile, string> = {
   standard: 'Standard limits',
@@ -104,6 +106,7 @@ export interface State {
   start_pose: Pose | null
   start_pose_id: string | null
   start_poses: { id: string; label: string; created: string; legacy: boolean }[]
+  saved_data: Record<SavedKind, SavedItem[]> | null
   reset_target: Pose | null
   rest_target: Pose | null
   at_rest: boolean

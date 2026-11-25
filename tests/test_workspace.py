@@ -52,6 +52,91 @@ def test_connection_uses_the_configured_mac_camera_buffer(tmp_path, settings, ex
         session._close_devices()
 
 
+def test_saved_data_cleanup_preserves_other_artifacts(tmp_path):
+    rest = tmp_path / "poses" / "simulation-simulation-rest.json"
+    start = tmp_path / "poses" / "simulation-simulation.json"
+    pose = {"version": 1, "position": SimulatedFollower(CONTROL).read()}
+    write_json(rest, pose)
+    write_json(start, pose)
+    path = tmp_path / "paths" / "raw.json"
+    write_json(path, {"samples": []})
+    recording = tmp_path / "datasets" / "old-recording"
+    retained = tmp_path / "datasets" / "keep-recording"
+    info = {"codebase_version": "v3.0", "total_episodes": 1}
+    write_json(recording / "meta" / "info.json", info)
+    write_json(retained / "meta" / "info.json", info)
+    write_json(recording / "ghostpath.json", {"episodes": [{"poses": {"rest": pose}}]})
+    (recording / "linked-paths").symlink_to(path.parent, target_is_directory=True)
+
+    with TestClient(create_app(tmp_path), base_url="http://localhost") as client:
+        with client.websocket_connect("ws://localhost/ws") as ws:
+            ws.send_json({"action": "refresh_saved"})
+            state = wait_for(ws, lambda state: state["saved_data"] is not None)
+            assert [item["id"] for item in state["saved_data"]["rest"]] == [rest.name]
+            assert {item["id"]: item["episodes"] for item in state["saved_data"]["recording"]} == {
+                recording.name: 1, retained.name: 1,
+            }
+            ws.send_json({
+                "action": "delete_saved", "saved_kind": "rest", "saved_id": rest.name,
+                "confirmed": True,
+            })
+            wait_for(ws, lambda state: not state["saved_data"]["rest"])
+            assert (recording / "ghostpath.json").exists()
+            ws.send_json({
+                "action": "delete_saved", "saved_kind": "recording", "saved_id": recording.name,
+                "confirmed": True,
+            })
+            wait_for(ws, lambda state: len(state["saved_data"]["recording"]) == 1)
+    assert not rest.exists()
+    assert not recording.exists()
+    assert start.exists() and path.exists() and retained.exists()
+
+
+def test_saved_data_cleanup_requires_confirmation_and_disconnection(tmp_path):
+    session = Session(tmp_path)
+    rest = tmp_path / "poses" / "simulation-simulation-rest.json"
+    pose = SimulatedFollower(CONTROL).read()
+    write_json(rest, {"version": 1, "position": pose})
+    session._command(Command(action="refresh_saved"))
+    delete = Command(action="delete_saved", saved_kind="rest", saved_id=rest.name)
+    with pytest.raises(WorkflowError, match="Confirm"):
+        session._command(delete)
+    session._command(Command(action="connect", config=Configuration(cameras=[])))
+    try:
+        with pytest.raises(WorkflowError, match="unavailable"):
+            session._command(delete.model_copy(update={"confirmed": True}))
+        assert rest.exists() and session.rest_pose == pose
+    finally:
+        session._close_devices()
+
+
+def test_saved_data_cleanup_ignores_unrelated_and_linked_directories(tmp_path):
+    session = Session(tmp_path / "workspace")
+    outside = tmp_path / "other-recording"
+    info = {"codebase_version": "v3.0", "total_episodes": 1}
+    write_json(outside / "meta" / "info.json", info)
+    datasets = session.data / "datasets"
+    write_json(datasets / "notes" / "note.json", {})
+    (datasets / "linked").symlink_to(outside, target_is_directory=True)
+    (datasets / "linked-meta").mkdir()
+    (datasets / "linked-meta" / "meta").symlink_to(outside / "meta", target_is_directory=True)
+    valid = datasets / "local"
+    write_json(valid / "meta" / "info.json", info)
+    session._command(Command(action="refresh_saved"))
+    assert [item["id"] for item in session.saved_data["recording"]] == [valid.name]
+
+    (valid / "meta" / "info.json").unlink()
+    (valid / "meta").rmdir()
+    valid.rmdir()
+    valid.symlink_to(outside, target_is_directory=True)
+    for ident in ("../../other-recording", "linked", "linked-meta", "notes", valid.name):
+        with pytest.raises(WorkflowError, match="unavailable"):
+            session._command(Command(
+                action="delete_saved", saved_kind="recording", saved_id=ident, confirmed=True,
+            ))
+    assert (outside / "meta" / "info.json").exists()
+
+
 def test_recording_picks_the_closer_control_tick_with_matching_action(tmp_path):
     session = Session(tmp_path)
     session.config = Configuration(fps=20)

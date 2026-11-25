@@ -40,6 +40,8 @@ The trace contains sequence numbers, presentation, arrival, and availability tim
 
 Under **Rest position**, use **Save current as rest** to keep a separate parking pose. It is never used as the task start. Saving or clearing rest does not move the arm, and GhostPath never parks automatically; use **Return to rest** only after emptying the gripper and clearing the full route. Start and rest saves are scoped to the robot ID and calibration. Taught paths still keep their own start and raw samples, without creating start-library entries.
 
+To remove old parking poses or recordings, finish any active dataset, disconnect, and open **Clean up saved data** on the setup screen. It lists saved parking poses across calibrations and local LeRobot v3 recording datasets. Deleting a recording permanently removes the whole dataset, not an individual episode. Deleting a parking pose leaves previous recordings unchanged. Neither action removes raw taught paths or saved task starts.
+
 If the gripper slips on a rigid object, try **Episode options → Firm grip**. It adds a small extra closure to detected carries without changing the arm path. Carry detection uses joint readings, not images or contact sensing. You can also enable **Keyboard grip adjustment** for Boomerang: hold **C** to close or **O** to open, then release the key to ease back. A completed Boomerang saves those adjustments for replay without overwriting the raw teaching samples.
 
 ## Record and review

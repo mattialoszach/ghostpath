@@ -17,7 +17,8 @@ from uuid import uuid4
 from .cameras import CameraNotReady, Cameras, source_index
 from .dataset import Datasets, Record
 from .grip import CarryGripPath, GripAssist, GrippedPath
-from .models import Command, Configuration, JogSpeed, Mode, Phase, ReplayProfile
+from .library import SavedItem, delete_saved_item, saved_library
+from .models import Command, Configuration, JogSpeed, Mode, Phase, ReplayProfile, SavedKind
 from .motion import JOINTS, Motion, ParkTrajectory, Pose, ReplayJog, SafetyFault, Settings
 from .poses import SavedStart, write_json
 from .robot import Follower, Robot, SimulatedFollower
@@ -93,6 +94,7 @@ class Session:
         self.start_pose_id: str | None = None
         self.saved_starts: dict[str, SavedStart] = {}
         self.rest_pose: Pose | None = None
+        self.saved_data: dict[SavedKind, list[SavedItem]] | None = None
         self.pose: Pose | None = None
         self.power: TorqueManager | None = None
         self.teacher: Teaching | None = None
@@ -250,6 +252,15 @@ class Session:
                 self.config = cmd.config
             if action == "connect":
                 self._connect()
+        elif action == "refresh_saved":
+            self._require(Phase.SETUP)
+            try:
+                self.saved_data = saved_library(self.data)
+            except OSError as exc:
+                raise WorkflowError(f"Could not list saved data: {exc}") from exc
+        elif action == "delete_saved":
+            self._require(Phase.SETUP)
+            self._delete_saved(cmd)
         elif action == "disconnect":
             self._require(
                 Phase.READY,
@@ -537,6 +548,24 @@ class Session:
             candidate = f"{base}-{index:03}"
         return candidate
 
+    def _delete_saved(self, cmd: Command):
+        kind = cmd.saved_kind
+        if not cmd.confirmed or kind is None or not self.saved_data:
+            raise WorkflowError("Confirm which saved item to delete.")
+        entries = self.saved_data[kind]
+        if not any(entry["id"] == cmd.saved_id for entry in entries):
+            raise WorkflowError("That saved item is unavailable. Refresh the list and try again.")
+        try:
+            delete_saved_item(self.data, kind, cmd.saved_id)
+        except (OSError, ValueError) as exc:
+            raise WorkflowError(f"Could not delete the saved item: {exc}") from exc
+        self.saved_data = {
+            **self.saved_data, kind: [entry for entry in entries if entry["id"] != cmd.saved_id],
+        }
+        self.notice = (
+            "Saved rest position deleted." if kind == "rest" else "Recording dataset deleted."
+        )
+
     def _connect(self):
         if (self.data / "datasets" / self.config.dataset).exists():
             raise WorkflowError("This dataset name exists. Enter a fresh name in setup.")
@@ -686,6 +715,7 @@ class Session:
         self.start_pose_id = None
         self.saved_starts = {}
         self.rest_pose = None
+        self.saved_data = None
         self._clear_teaching()
         self.reset_action = None
         self.return_phase = None
@@ -1634,6 +1664,7 @@ class Session:
             "start_pose": self.start_pose,
             "start_pose_id": self.start_pose_id,
             "start_poses": [saved.summary() for saved in self.saved_starts.values()],
+            "saved_data": self.saved_data if self.phase == Phase.SETUP else None,
             "reset_target": self._reset_goal(),
             "rest_target": self._park_goal(),
             "custom_rest": self.rest_pose is not None,

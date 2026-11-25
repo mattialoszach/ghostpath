@@ -153,6 +153,12 @@ figcaption .record-source { color: #ffc19c; }
 .setup-section > summary::-webkit-details-marker, .diagnostics > summary::-webkit-details-marker, .episode-options > summary::-webkit-details-marker { display: none; }
 .setup-section > summary { padding-block: 12px; }
 .setup-section[open] > summary svg:last-child, .diagnostics[open] > summary svg:first-child, .episode-options[open] > summary svg:first-child { rotate: 180deg; }
+.saved-data { padding-inline: clamp(13px, 2.5vw, 24px); }
+.saved-data h3 { font-size: 13px; }
+.saved-data-list { list-style: none; padding: 0; margin: 4px 0 0; }
+.saved-data-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 7px 0; }
+.saved-data-list strong { font: 12px var(--mono); overflow-wrap: anywhere; }
+.saved-data-list .text-button { flex-shrink: 0; }
 .disclosure-value { margin-left: auto; color: var(--muted); font: 11px var(--mono); }
 .diagnostics { border-top: 1px solid var(--line); }
 .diagnostics > summary { color: var(--muted); padding: 8px 0; }

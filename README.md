@@ -41,6 +41,8 @@ Open [localhost:8765](http://127.0.0.1:8765/) in one browser tab. Choose **Conne
 
 Datasets stay on your computer in `data/datasets/<name>` in [LeRobotDataset v3.0 format](https://huggingface.co/docs/lerobot/lerobot-dataset-v3). `observation.state` contains measured joint positions; `action` contains the commands actually sent. The raw hand-guided path is saved separately in `data/paths/` so you can reuse it without treating it as a commanded action.
 
+To delete old parking poses or whole recording datasets, disconnect and open **Clean up saved data** on the setup screen. Deleting either leaves raw taught paths intact.
+
 See the [recording guide](docs/recording.md) for camera setup, replay options, troubleshooting, and a Python example for opening a dataset. Pass `--data /path/to/workspace` or `--port 8765` to change the default storage location or server port.
 
 ## Development

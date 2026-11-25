@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_MAC_CAMERA_BUFFER_MS = 60
+type SavedKind = Literal["rest", "recording"]
 
 
 class StrictModel(BaseModel):
@@ -105,6 +106,8 @@ class Command(StrictModel):
         "delete_start",
         "capture_rest",
         "clear_rest",
+        "refresh_saved",
+        "delete_saved",
         "park",
         "release_torque",
         "hold_torque",
@@ -150,5 +153,7 @@ class Command(StrictModel):
     path_id: str = ""
     pose_id: str = ""
     pose_label: str = Field(default="", max_length=60)
+    saved_kind: SavedKind | None = None
+    saved_id: str = Field(default="", max_length=160)
     reuse: bool | None = None
     manual_finish: bool | None = None

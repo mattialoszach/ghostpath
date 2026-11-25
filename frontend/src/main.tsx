@@ -2,7 +2,7 @@ import '@fontsource-variable/inter/wght.css'
 import '@fontsource/ibm-plex-mono/latin-400.css'
 import {
   ArrowDownToLine, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardCheck, Crosshair,
-  Camera, Database, Hand, Play, Radio, RotateCcw, Save, Square, TriangleAlert, X, Zap, ZapOff,
+  Camera, Database, Hand, Play, Radio, RotateCcw, Save, Square, Trash2, TriangleAlert, X, Zap, ZapOff,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -13,7 +13,7 @@ import {
 } from './panels'
 import { useWorkspace } from './socket'
 import { defaults, elapsed, humanize, jointLabels, replayProfileLabels } from './types'
-import type { Config, Phase, Send, State } from './types'
+import type { Config, Phase, SavedItem, SavedKind, Send, State } from './types'
 import './styles.css'
 
 const steps = [
@@ -106,6 +106,44 @@ function Confirmation({ value, close }: { value: Confirm; close: () => void }) {
     <h2 id="confirmation-title">{value.title}</h2><p>{value.text}</p>
     <div className="actions"><button type="button" className="button" onClick={close} autoFocus>Cancel</button><button type="button" className="button primary" onClick={() => { close(); value.submit() }}>{value.label}</button></div>
   </dialog>
+}
+
+const savedGroups = [['rest', 'Rest positions'], ['recording', 'Recording datasets']] as const
+
+function SavedDataPanel({ state, send, available }: { state: State | null; send: Send; available: boolean }) {
+  const [confirm, setConfirm] = useState<Confirm | null>(null)
+  const saved = state?.saved_data
+  const remove = (kind: SavedKind, item: SavedItem) => setConfirm({
+    title: `Delete ${item.label}?`,
+    text: kind === 'rest'
+      ? 'This permanently deletes the saved parking position. It does not move the arm or change task starts, recordings, or taught paths.'
+      : 'This permanently deletes the entire dataset and all its episodes, including videos and telemetry. Saved poses and raw taught paths are kept.',
+    label: kind === 'rest' ? 'Delete rest position' : 'Delete dataset',
+    submit: () => send('delete_saved', { saved_kind: kind, saved_id: item.id, confirmed: true }),
+  })
+  return <details className="panel setup-section saved-data" onToggle={event => {
+    if (event.currentTarget.open && available) send('refresh_saved')
+  }}>
+    <summary><Trash2 size={16} /> Clean up saved data <ChevronDown className="push" size={14} /></summary>
+    <div className="setup-section-content">
+      <p className="hint">Delete unused parking poses or whole recording datasets. Taught paths are stored separately and are kept.</p>
+      {saved && savedGroups.map(([kind, title]) => <div key={kind}>
+        <h3>{title}</h3>
+        {saved[kind].length === 0 ? <p className="hint">None found.</p> :
+          <ul className="saved-data-list">{saved[kind].map(item => <li key={item.id}>
+            <div>
+              <strong>{item.label}</strong>
+              <p className="hint">{item.episodes !== null && `${item.episodes} ${item.episodes === 1 ? 'episode' : 'episodes'} · `}
+                <time dateTime={item.modified}>{new Date(item.modified).toLocaleString()}</time></p>
+            </div>
+            <button type="button" className="text-button" disabled={!available} aria-label={`Delete ${item.label}`} onClick={() => remove(kind, item)}><X size={14} /> Delete</button>
+          </li>)}</ul>}
+      </div>)}
+      <div className="actions"><button type="button" className="button" disabled={!available} onClick={() => send('refresh_saved')}><RotateCcw size={14} /> Refresh list</button></div>
+      {state?.notice.match(/^(Saved rest position deleted\.|Recording dataset deleted\.)/) && <p className="hint" role="status">{state.notice}</p>}
+    </div>
+    {confirm && <Confirmation value={confirm} close={() => setConfirm(null)} />}
+  </details>
 }
 
 function DatasetOutput({ path }: { path: string }) {
@@ -486,10 +524,13 @@ function App() {
     <main className={`main ${phase === 'setup' ? 'setup-main' : ''}`}>
       {phase === 'setup' ? <div className="setup-intro"><h1 className="setup-title">Set up collection</h1><p>Try the full workflow in the simulator, or connect a calibrated SO-101 follower.</p></div> : state && <EpisodeHeader state={state} config={activeConfig} />}
       {error && <div className="alert" role="alert"><TriangleAlert size={17} /><span>{error}</span><button className="icon-button bare push" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
-      {phase === 'setup' ? <SetupPanel config={setupConfig} change={next => {
-        if (next.dataset !== setupConfig.dataset) setDatasetEdited(true)
-        setConfig(next)
-      }} available={available} connect={() => send('connect', { config: setupConfig })} /> :
+      {phase === 'setup' ? <div className="main-stack">
+        <SetupPanel config={setupConfig} change={next => {
+          if (next.dataset !== setupConfig.dataset) setDatasetEdited(true)
+          setConfig(next)
+        }} available={available} connect={() => send('connect', { config: setupConfig })} />
+        <SavedDataPanel state={state} send={send} available={available} />
+      </div> :
         <div className="main-stack">
           <Workflow state={state} config={activeConfig} send={send} online={online} available={available} />
           {phase !== 'finished' && <>
