@@ -71,6 +71,9 @@ IDLE = {Phase.READY, Phase.TEACH_PAUSED, Phase.RESET, Phase.REVIEW, Phase.NEXT, 
 REST_PHASES = (Phase.READY, Phase.RESET, Phase.NEXT, Phase.FINISHED)
 JOG_LEASE_SECONDS = 0.25
 JOG_BRAKE_SECONDS = 0.40
+JOG_STALL_SECONDS = 1.0
+JOG_STALL_MARGIN = 0.35
+JOG_PROGRESS_DEGREES = 0.4
 
 
 class WorkflowError(ValueError):
@@ -119,6 +122,7 @@ class Session:
         self.jog_at = 0.0
         self.jog_active = False
         self.jog_hard_stop = False
+        self.jog_progress: dict[str, tuple[float, float, float]] = {}
         self.replay_jog: ReplayJog | None = None
         self.record_origin: float | None = None
         self.record_index = 0
@@ -1300,6 +1304,7 @@ class Session:
                 target = overlay.step(
                     self.axes, max(0.0001, dt), self.pose, target, immediate=immediate,
                 )
+                self._check_jog_progress(now, overlay.motion)
                 override_joints = overlay.joints
                 if override_joints:
                     reference = {**reference, **{joint: target[joint] for joint in override_joints}}
@@ -1370,6 +1375,36 @@ class Session:
         self.axes = {}
         self.jog_at = 0.0
         self.jog_active = self.jog_hard_stop = False
+        self.jog_progress.clear()
+
+    def _check_jog_progress(self, now: float, motion: Motion):
+        if not self.axes:
+            self.jog_progress.clear()
+            return
+        for joint in JOINTS:
+            axis = self.axes.get(joint, 0.0)
+            if not axis or joint == "gripper":
+                self.jog_progress.pop(joint, None)
+                continue
+            position, goal = self.pose[joint], motion.target[joint]
+            direction = 1.0 if axis > 0 else -1.0
+            if (goal - position) * direction < motion.settings.lead(joint) - JOG_STALL_MARGIN:
+                self.jog_progress.pop(joint, None)
+                continue
+            previous = self.jog_progress.get(joint)
+            if previous is not None:
+                previous_direction, since, previous_position = previous
+                if previous_direction == direction and (
+                    (position - previous_position) * direction < JOG_PROGRESS_DEGREES
+                ):
+                    if now - since >= JOG_STALL_SECONDS:
+                        name = joint.replace("_", " ").capitalize()
+                        raise SafetyFault(
+                            f"{name} stalled while jogging (measured {position:.1f}°, "
+                            f"goal {goal:.1f}°). Check for load or obstruction."
+                        )
+                    continue
+            self.jog_progress[joint] = (direction, now, position)
 
     def _can_override_replay(self) -> bool:
         return (
@@ -1453,6 +1488,8 @@ class Session:
                 self.motion.hold(self.pose) if hard_stop
                 else self.motion.step(self.axes, max(0.0001, dt), self.pose)
             )
+            if not hard_stop:
+                self._check_jog_progress(now, self.motion)
             send_started = time.monotonic()
             self.manual_goal = self.robot.send(reference, force=hard_stop)
             command_send = (send_started, time.monotonic())

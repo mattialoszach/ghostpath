@@ -10,12 +10,12 @@ from ghostpath.api import create_app
 from ghostpath.cameras import CameraNotReady, Cameras
 from ghostpath.grip import CarryGripPath, GrippedPath
 from ghostpath.models import Command, Configuration, JogSpeed, Phase, ReplayProfile
-from ghostpath.motion import JOINTS, Motion
+from ghostpath.motion import JOINTS, Motion, ParkTrajectory, ReplayJog, SafetyFault
 from ghostpath.poses import write_json
 from ghostpath.robot import SimulatedFollower
 from ghostpath.session import CONTROL, FAST_REPLAY, MANUAL_JOG, Session, WorkflowError
 from ghostpath.torque import TorqueManager
-from ghostpath.trajectory import ReversePath, Sample, Teaching
+from ghostpath.trajectory import AlignedPath, ReversePath, Sample, Teaching
 
 
 def wait_for(ws, predicate):
@@ -420,10 +420,55 @@ def test_manual_jog_eases_release_but_holds_on_blur_or_stale_input(
         session._close_devices()
 
 
-@pytest.mark.parametrize("release", ["key-up", "expired-lease"])
-def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(tmp_path, release):
+@pytest.mark.parametrize("replaying", [False, True], ids=["manual", "mixed-replay"])
+@pytest.mark.parametrize("joint", ["shoulder_lift", "gripper"])
+def test_jog_reports_a_stalled_arm_joint_but_allows_gripping(
+    tmp_path, monkeypatch, replaying, joint
+):
+    session = Session(tmp_path)
+    session.config = Configuration(cameras=[])
+    session._command(Command(action="connect"))
+    try:
+        session._command(Command(action="practice"))
+        start = session.pose.copy()
+        monkeypatch.setattr(session.robot, "read", lambda: start.copy())
+        if replaying:
+            session.path = ParkTrajectory(start, {**start, "shoulder_pan": 10}, CONTROL)
+            session.datasets = SimpleNamespace(error=None, offer=lambda _record: None)
+            session._start_player(AlignedPath(start, session.path, CONTROL), Phase.REPLAY)
+            session.replay_jog = ReplayJog(start, session.robot.limits, MANUAL_JOG)
+        session._command(Command(action="jog", axes={joint: -1}))
+        started = session.last_tick
+        fault = None
+        for tick in range(1, 3 * CONTROL.fps):
+            now = started + tick / CONTROL.fps
+            session.jog_at = now
+            session.heartbeat()
+            try:
+                session._tick(now)
+            except SafetyFault as exc:
+                fault = str(exc)
+                break
+        goal = start[joint] - MANUAL_JOG.lead(joint)
+        assert session.robot.target[joint] == pytest.approx(goal, abs=0.35)
+        if joint == "shoulder_lift":
+            assert fault and "Shoulder lift stalled while jogging" in fault
+            assert "measured" in fault and "goal" in fault
+        else:
+            assert fault is None
+    finally:
+        session._close_devices()
+
+
+@pytest.mark.parametrize(("release", "joint"), [
+    ("key-up", "shoulder_lift"), ("expired-lease", "gripper"),
+])
+def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(
+    tmp_path, release, joint
+):
     dataset_module = pytest.importorskip("lerobot.datasets.lerobot_dataset")
     start = SimulatedFollower(CONTROL).read()
+    position, joint_index = start[joint], JOINTS.index(joint)
     path_id = "20261120T000000-abcdef12"
     path_file = tmp_path / "paths" / f"{path_id}.json"
     write_json(path_file, {
@@ -442,10 +487,10 @@ def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(t
                 def refresh(state):
                     if predicate(state):
                         return True
-                    ws.send_json({"action": "jog", "axes": {"gripper": -1}})
+                    ws.send_json({"action": "jog", "axes": {joint: -1}})
                     return False
 
-                ws.send_json({"action": "jog", "axes": {"gripper": -1}})
+                ws.send_json({"action": "jog", "axes": {joint: -1}})
                 return wait_for(ws, refresh)
 
             ws.send_json({"action": "connect", "config": {"cameras": []}})
@@ -459,22 +504,22 @@ def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(t
             ws.send_json({"action": "set_jog_speed", "jog_speed": "normal"})
             wait_for(ws, lambda state: state["jog_speed"] == "normal")
             assert app.state.session.robot.settings == CONTROL
-            overridden = hold_jog_until(lambda state: state["pose"]["gripper"] < 63.5)
+            overridden = hold_jog_until(lambda state: state["pose"][joint] < position - 1.5)
             assert overridden["phase"] == "replay" and overridden["recording"]
-            assert overridden["override_joints"] == ["gripper"]
+            assert overridden["override_joints"] == [joint]
             assert not overridden["can_set_jog_speed"]
             assert overridden["pose"]["shoulder_pan"] > first["pose"]["shoulder_pan"] + 0.5
             if release == "key-up":
                 ws.send_json({"action": "jog", "axes": {}})
             rejoined = wait_for(ws, lambda state: state["can_set_jog_speed"])
             assert rejoined["phase"] == "replay" and rejoined["override_joints"] == []
-            assert rejoined["pose"]["gripper"] == pytest.approx(65, abs=0.4)
+            assert rejoined["pose"][joint] == pytest.approx(position, abs=0.4)
 
             wait_for(ws, lambda state: state["phase"] == "replay" and state["progress"] >= .88)
             manual = hold_jog_until(lambda state: state["phase"] == "manual")
             assert manual["recording"] and manual["progress"] == 1
-            assert manual["pose"]["gripper"] < 63.5
-            wait_for(ws, lambda state: state["pose"]["gripper"] < manual["pose"]["gripper"] - 0.5)
+            assert manual["pose"][joint] < position - 1.5
+            wait_for(ws, lambda state: state["pose"][joint] < manual["pose"][joint] - 0.5)
             ws.send_json({"action": "jog", "axes": {}})
             ws.send_json({"action": "finish_manual"})
             wait_for(ws, lambda state: state["phase"] == "review")
@@ -491,13 +536,13 @@ def test_hybrid_replay_records_overrides_rejoins_and_keeps_held_jog_after_path(t
     (episode,) = json.loads((root / "ghostpath.json").read_text())["episodes"]
     assert "manual_takeover_seconds" not in episode
     ticks = json.loads((root / episode["control_trace"]).read_text())["ticks"]
-    overlays = [tick for tick in ticks if tick.get("override_joints") == ["gripper"]]
+    overlays = [tick for tick in ticks if tick.get("override_joints") == [joint]]
     assert len(overlays) > 10
     assert all(tick["stage"] in {"path", "settling"} for tick in overlays)
     assert all(tick["path_cursor"] is not None for tick in overlays)
-    assert any(tick["state"][-1] != tick["action"][-1] for tick in overlays)
+    assert any(tick["state"][joint_index] != tick["action"][joint_index] for tick in overlays)
     assert any(
-        tick["stage"] == "manual" and tick["action"][-1] < manual["pose"]["gripper"]
+        tick["stage"] == "manual" and tick["action"][joint_index] < manual["pose"][joint]
         for tick in ticks
     )
 

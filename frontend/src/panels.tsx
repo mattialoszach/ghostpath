@@ -402,13 +402,14 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
   const spaceHeld = useRef(false)
   const active = useRef<Partial<Record<Joint, number>>>({})
   const [highlight, setHighlight] = useState(active.current)
-  const canJog = enabled && !pending && (!replaying || state.can_override_replay)
+  const keyboardEnabled = enabled && !pending
+  const canJog = keyboardEnabled && (!replaying || state.can_override_replay)
 
-  const transmit = useCallback(() => {
+  const transmit = useCallback((useDirections = true) => {
     const current = input.current
     const keys = pressed.current
     const axes: Partial<Record<Joint, number>> = current ? { [current.joint]: current.value } : {}
-    if (!current) {
+    if (!current && useDirections) {
       for (const joint of joints) {
         const direction = jogKeys[joint].reduce((sum, key) => sum + (keys.has(key.code) ? key.value : 0), 0)
         if (direction) axes[joint] = direction
@@ -432,12 +433,25 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
     send('jog', { axes: {}, immediate_stop: true })
   }, [clear, send])
 
+  const focusKeyboard = useCallback(() => panel.current?.focus({ preventScroll: true }), [])
+
   useEffect(() => {
-    if (!enabled) {
+    if (keyboardEnabled) focusKeyboard()
+  }, [focusKeyboard, keyboardEnabled])
+
+  useEffect(() => {
+    if (!replaying && !spaceHeld.current) pressed.current.clear()
+  }, [replaying])
+
+  useEffect(() => {
+    if (!keyboardEnabled) {
       clear()
       return
     }
-    if (canJog) panel.current?.focus({ preventScroll: true })
+    if (canJog && spaceHeld.current && pressed.current.size &&
+        document.hasFocus() && document.activeElement === panel.current) {
+      transmit()
+    }
     const tick = canJog ? window.setInterval(() => {
       if (Object.keys(active.current).length) send('jog', { axes: active.current })
     }, 80) : undefined
@@ -451,7 +465,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       document.removeEventListener('visibilitychange', visibility)
       if (canJog) stop()
     }
-  }, [canJog, clear, enabled, send, stop])
+  }, [canJog, clear, keyboardEnabled, send, stop, transmit])
 
   const start = (next: JogInput) => {
     if (!canJog || input.current) return
@@ -476,7 +490,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       }
     }}
     onKeyDown={event => {
-      if (!enabled || event.target !== event.currentTarget) return
+      if (!keyboardEnabled || event.target !== event.currentTarget) return
       if (event.key === 'Escape') {
         clear()
         return
@@ -484,27 +498,30 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
       if (event.code === 'Space') {
         event.preventDefault()
-        if (replaying && canJog && !event.repeat) spaceHeld.current = true
+        if (replaying && !spaceHeld.current && !event.repeat) {
+          spaceHeld.current = true
+          if (canJog && !input.current && pressed.current.size) transmit()
+        }
         return
       }
-      if (!canJog || (replaying && !spaceHeld.current) || !directionCodes.has(event.code)) return
+      if (!directionCodes.has(event.code)) return
       event.preventDefault()
       if (!input.current && !event.repeat && !pressed.current.has(event.code)) {
         pressed.current.add(event.code)
-        transmit()
+        if (canJog && (!replaying || spaceHeld.current)) transmit()
       }
     }}
     onKeyUp={event => {
       if (event.code === 'Space' && spaceHeld.current) {
         spaceHeld.current = false
         const moving = pressed.current.size > 0
-        pressed.current.clear()
-        if (moving && canJog) transmit()
-      } else if (pressed.current.delete(event.code) && canJog) transmit()
+        if (!replaying) pressed.current.clear()
+        if (moving && canJog) transmit(!replaying)
+      } else if (pressed.current.delete(event.code) && canJog && (!replaying || spaceHeld.current)) transmit()
     }}>
     <p>{!replaying ? 'Hold a direction key or button to move. Release to ease to a stop.'
       : state.can_override_replay ? <>Hold <kbd>Space</kbd> and a direction key to override that joint while the rest follow the path. Release to ease back.</>
-        : 'Joint overrides are available once alignment finishes.'}</p>
+        : <>You can hold <kbd>Space</kbd> and a direction key now. The override starts only after alignment.</>}</p>
     {state.override_joints.length > 0 && <p>Override: {state.override_joints.map(joint => jointLabels[joint]).join(', ')}</p>}
     <label className="field">Jog speed
       <select value={state.jog_speed} disabled={!canJog || !state.can_set_jog_speed || Object.keys(highlight).length > 0}
@@ -522,7 +539,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
           onPointerDown={event => {
             if (!canJog || event.button !== 0 || input.current) return
             event.preventDefault()
-            panel.current?.focus({ preventScroll: true })
+            focusKeyboard()
             event.currentTarget.setPointerCapture(event.pointerId)
             start({ joint, value, owner: event.pointerId })
           }}
@@ -539,7 +556,7 @@ export function ManualControls({ state, send, enabled, pending = false, replayin
         ><kbd>{keyLabel(code)}</kbd><span>{label}</span></button>
       </dd>)}
     </div>)}</dl>
-    <small>Focus this panel to use the shortcuts. <kbd>Esc</kbd> stops motion.</small>
+    <small><button type="button" className="button" disabled={!keyboardEnabled} onClick={focusKeyboard}>Focus keyboard controls</button> <kbd>Esc</kbd> stops motion.</small>
   </div>
 }
 
